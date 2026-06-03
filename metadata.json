@@ -1,0 +1,6 @@
+{
+  "name": "3DFANS CRM",
+  "description": "WhatsApp CRM com Evolution API v2 para gestão de contatos e campanhas em massa.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

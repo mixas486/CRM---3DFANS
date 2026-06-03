@@ -1,0 +1,12 @@
+{
+  "firestore": [
+    {
+      "database": "(default)",
+      "rules": "firestore.rules"
+    },
+    {
+      "database": "crm-3dfans",
+      "rules": "firestore.rules"
+    }
+  ]
+}

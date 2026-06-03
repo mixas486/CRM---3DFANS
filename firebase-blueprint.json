@@ -1,0 +1,94 @@
+{
+  "entities": {
+    "Contact": {
+      "title": "Contact",
+      "description": "A lead or customer saved in the CRM.",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "telefoneRaw": { "type": "string" },
+        "telefoneE164": { "type": "string" },
+        "email": { "type": "string" },
+        "cidade": { "type": "string" },
+        "interesse": { "type": "string" },
+        "produto": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "stage": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "optIn": { "type": "boolean" },
+        "needsReview": { "type": "boolean" },
+        "valorEstimado": { "type": "number" },
+        "stageChangedAt": { "type": "number", "description": "Timestamp" },
+        "lastContactAt": { "type": "number", "description": "Timestamp" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "number", "description": "Timestamp" }
+      },
+      "required": ["nome", "telefoneE164", "stage", "status", "optIn", "needsReview", "createdAt"]
+    },
+    "Campaign": {
+      "title": "Campaign",
+      "description": "Mass messaging campaign.",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "templateText": { "type": "string" },
+        "audienceFilter": { "type": "object" },
+        "status": { "type": "string" },
+        "stats": { "type": "object" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["nome", "templateText", "status", "stats", "createdAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A single WhatsApp message.",
+      "type": "object",
+      "properties": {
+        "contactId": { "type": "string" },
+        "direction": { "type": "string", "enum": ["inbound", "outbound"] },
+        "body": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["contactId", "direction", "body", "timestamp", "status"]
+    },
+    "Settings": {
+      "title": "Settings",
+      "description": "Application settings (singleton per tenant).",
+      "type": "object",
+      "properties": {
+        "evolutionUrl": { "type": "string" },
+        "instanceName": { "type": "string" },
+        "delayMinMs": { "type": "number" },
+        "delayMaxMs": { "type": "number" },
+        "dailyLimit": { "type": "number" }
+      },
+      "required": ["evolutionUrl", "instanceName", "delayMinMs", "delayMaxMs", "dailyLimit"]
+    }
+  },
+  "firestore": {
+    "contacts/{contactId}": {
+      "schema": "Contact",
+      "description": "Store all contacts."
+    },
+    "campaigns/{campaignId}": {
+      "schema": "Campaign",
+      "description": "Store all mass messaging campaigns."
+    },
+    "messages/{messageId}": {
+      "schema": "Message",
+      "description": "Store all messages (inbox and outbox)."
+    },
+    "settings/{settingId}": {
+      "schema": "Settings",
+      "description": "Store application settings. usually ID is 'global'."
+    },
+    "campaign_queue/{queueId}": {
+      "description": "Store pending contacts to be processed for any running campaign."
+    },
+    "campaign_logs/{logId}": {
+      "description": "Real-time execution logs for campaigns."
+    }
+  }
+}
