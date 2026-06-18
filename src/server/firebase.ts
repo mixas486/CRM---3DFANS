@@ -1,5 +1,6 @@
 import { initializeApp, getApps } from "firebase/app";
 import { initializeFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAJt3GcqLqf5Prd2waVePNDYi5xQevNB-I",
@@ -19,6 +20,8 @@ const app =
 export const serverDb = initializeFirestore(app, {
   ignoreUndefinedProperties: true
 }, "crm-3dfans");
+
+export const serverStorage = getStorage(app);
 
 console.log("[Firestore] Connected to crm-3dfans database");
 

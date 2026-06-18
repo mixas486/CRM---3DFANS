@@ -11,7 +11,8 @@ import { getDocs, query, where, Timestamp } from 'firebase/firestore';
 
 interface ImportCSVModalProps {
   onClose: () => void;
-  existingContacts: Contact[]; // To help with duplicate checks
+  existingContacts: Contact[];
+  targetFolderId?: string | null;
 }
 
 type RowStatus = 'valid' | 'review' | 'discard';
@@ -32,7 +33,7 @@ interface ParsedRow {
   isPossibleDuplicate?: boolean; // Weak match (1 digit off)
 }
 
-export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existingContacts }) => {
+export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existingContacts, targetFolderId }) => {
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<ParsedRow[]>([]);
   const [importing, setImporting] = useState(false);
@@ -216,7 +217,8 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
         notes: row.notes || '',
         lastContactAt: row.lastContactAt,
         needsReview: row.status === 'review',
-        optIn: true
+        optIn: true,
+        ...(targetFolderId ? { folderId: targetFolderId } : {}),
       }));
 
       try {
@@ -270,139 +272,149 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-5xl shadow-2xl flex flex-col max-h-[90vh] relative overflow-hidden">
-        
+      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-xl shadow-2xl flex flex-col max-h-[85vh] relative overflow-hidden">
+
         {/* Importing Overlay */}
         <AnimatePresence>
           {importing && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-20 bg-zinc-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6"
+              className="absolute inset-0 z-20 bg-zinc-950/95 backdrop-blur-sm flex flex-col items-center justify-center p-8 gap-6"
             >
-              <div className="w-full max-w-md bg-zinc-800 rounded-full h-2 mb-8 overflow-hidden">
-                <motion.div 
-                  className="bg-indigo-500 h-2 rounded-full" 
-                  initial={{ width: 0 }}
-                  animate={{ width: `${progress}%` }}
-                  transition={{ duration: 0.3 }}
+              <div className="relative w-16 h-16">
+                <motion.div
+                  className="absolute inset-0 rounded-full border-4 border-indigo-500/20"
                 />
+                <motion.div
+                  className="absolute inset-0 rounded-full border-4 border-t-indigo-500 border-r-transparent border-b-transparent border-l-transparent"
+                  animate={{ rotate: 360 }}
+                  transition={{ repeat: Infinity, duration: 0.9, ease: 'linear' }}
+                />
+                <div className="absolute inset-0 flex items-center justify-center text-indigo-400 font-bold text-sm">{progress}%</div>
               </div>
-              
-              <div className="h-24 overflow-hidden relative w-full max-w-md flex flex-col items-center justify-end [mask-image:linear-gradient(to_bottom,transparent,black_40%,black_100%)]">
-                <AnimatePresence mode="popLayout">
-                    {importingNames.map((n) => (
-                       <motion.div
-                          key={n.id}
-                          initial={{ y: 20, opacity: 0, scale: 0.9 }}
-                          animate={{ y: 0, opacity: 1, scale: 1 }}
-                          exit={{ y: -40, opacity: 0, scale: 0.9 }}
-                          transition={{ type: "spring", bounce: 0, duration: 0.4 }}
-                          className="text-2xl font-medium text-white mb-2 text-center w-full truncate"
-                       >
-                          {n.nome}
-                       </motion.div>
+
+              <div className="w-full max-w-xs space-y-2">
+                <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+                  <motion.div
+                    className="bg-indigo-500 h-full rounded-full"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${progress}%` }}
+                    transition={{ duration: 0.3 }}
+                  />
+                </div>
+                <div className="h-8 overflow-hidden flex items-center justify-center [mask-image:linear-gradient(to_bottom,transparent,black_30%,black_70%,transparent)]">
+                  <AnimatePresence mode="popLayout">
+                    {importingNames.slice(-1).map((n) => (
+                      <motion.div
+                        key={n.id}
+                        initial={{ y: 12, opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        exit={{ y: -12, opacity: 0 }}
+                        transition={{ duration: 0.25 }}
+                        className="text-sm text-zinc-400 truncate text-center w-full"
+                      >
+                        {n.nome}
+                      </motion.div>
                     ))}
-                </AnimatePresence>
+                  </AnimatePresence>
+                </div>
               </div>
-              <div className="text-indigo-400 text-sm mt-8 font-medium animate-pulse">
-                 Importando contatos... {progress}%
-              </div>
+
+              <p className="text-zinc-500 text-xs">Importando contatos, aguarde...</p>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <div className="flex items-center justify-between p-6 border-b border-zinc-800">
-          <h3 className="text-xl font-semibold text-white flex items-center gap-2">
-            <Upload size={20} /> Importar Contatos CSV
-          </h3>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+          <div>
+            <h3 className="text-base font-semibold text-white flex items-center gap-2">
+              <Upload size={16} /> Importar Contatos CSV
+            </h3>
+            {targetFolderId && (
+              <p className="text-xs text-indigo-400 mt-0.5 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block" />
+                Contatos importados irão para a pasta selecionada
+              </p>
+            )}
+          </div>
           <button onClick={onClose} className="text-zinc-400 hover:text-white transition-colors" disabled={importing}>
-            <X size={24} />
+            <X size={20} />
           </button>
         </div>
 
-        <div className="p-6 flex-1 overflow-y-auto">
+        <div className="p-5 flex-1 overflow-y-auto">
           {preview.length === 0 ? (
-            <div className="border-2 border-dashed border-zinc-700 rounded-xl p-12 text-center">
-              <Upload size={48} className="mx-auto text-zinc-500 mb-4" />
-              <p className="text-zinc-300 font-medium text-lg mb-2">Selecione seu arquivo CSV exportado</p>
-              <p className="text-zinc-500 text-sm mb-6 max-w-md mx-auto leading-relaxed">
-                Suporta o formato nativo ou exportações do <span className="text-zinc-300">Google Contacts</span>. O sistema irá extrair automaticamente apenas o primeiro nome e o telefone das colunas: 
-                <span className="font-mono text-zinc-400 bg-zinc-800 px-1 ml-1 rounded">Name</span> / <span className="font-mono text-zinc-400 bg-zinc-800 px-1 ml-1 rounded">firstname</span> e 
-                <span className="font-mono text-zinc-400 bg-zinc-800 px-1 mx-1 rounded">Phone 1 - Value</span> / <span className="font-mono text-zinc-400 bg-zinc-800 px-1 mx-1 rounded">mobile</span>. Demais colunas serão desprezadas.
+            <div className="border-2 border-dashed border-zinc-700 rounded-xl p-8 text-center">
+              <Upload size={36} className="mx-auto text-zinc-500 mb-3" />
+              <p className="text-zinc-300 font-medium mb-1">Selecione o arquivo CSV</p>
+              <p className="text-zinc-500 text-xs mb-5 leading-relaxed">
+                Suporta Google Contacts e formato nativo. Extrai primeiro nome e telefone das colunas
+                <span className="font-mono text-zinc-400 bg-zinc-800 px-1 mx-1 rounded">Name</span>,
+                <span className="font-mono text-zinc-400 bg-zinc-800 px-1 mx-1 rounded">mobile</span>,
+                <span className="font-mono text-zinc-400 bg-zinc-800 px-1 ml-1 rounded">Phone 1 - Value</span>.
               </p>
-              <label className="bg-white text-zinc-950 px-6 py-3 rounded-lg font-medium cursor-pointer hover:bg-zinc-200 transition-colors inline-flex items-center gap-2">
-                {loading ? <Loader2 size={18} className="animate-spin" /> : 'Procurar Arquivo'}
+              <label className="bg-white text-zinc-950 px-5 py-2.5 rounded-lg font-medium cursor-pointer hover:bg-zinc-200 transition-colors inline-flex items-center gap-2 text-sm">
+                {loading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
+                {loading ? 'Processando...' : 'Escolher Arquivo'}
                 <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} disabled={loading} />
               </label>
             </div>
           ) : (
-            <div className="space-y-4">
-              <div className="grid grid-cols-4 gap-4 mb-4">
-                 <div className="bg-zinc-950 p-4 border border-zinc-800 rounded-lg">
-                    <p className="text-zinc-500 text-xs font-medium uppercase">Total Lidos</p>
-                    <p className="text-2xl font-bold text-white">{counts.total}</p>
-                 </div>
-                 <div className="bg-green-950/20 p-4 border border-green-500/20 rounded-lg">
-                    <p className="text-green-500 text-xs font-medium uppercase flex items-center gap-1"><CheckCircle2 size={14}/> Válidos</p>
-                    <p className="text-2xl font-bold text-green-400">{counts.valid}</p>
-                 </div>
-                 <div className="bg-amber-950/20 p-4 border border-amber-500/20 rounded-lg">
-                    <p className="text-amber-500 text-xs font-medium uppercase flex items-center gap-1"><HelpCircle size={14}/> Revisar</p>
-                    <p className="text-2xl font-bold text-amber-400">{counts.review}</p>
-                 </div>
-                 <div className="bg-red-950/20 p-4 border border-red-500/20 rounded-lg">
-                    <p className="text-red-500 text-xs font-medium uppercase flex items-center gap-1"><AlertCircle size={14}/> Descartados</p>
-                    <p className="text-2xl font-bold text-red-400">{counts.discard}</p>
-                 </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-4 gap-2">
+                <div className="bg-zinc-950 p-3 border border-zinc-800 rounded-lg text-center">
+                  <p className="text-zinc-500 text-[10px] font-medium uppercase">Total</p>
+                  <p className="text-xl font-bold text-white">{counts.total}</p>
+                </div>
+                <div className="bg-green-950/20 p-3 border border-green-500/20 rounded-lg text-center">
+                  <p className="text-green-500 text-[10px] font-medium uppercase flex items-center justify-center gap-1"><CheckCircle2 size={11}/> OK</p>
+                  <p className="text-xl font-bold text-green-400">{counts.valid}</p>
+                </div>
+                <div className="bg-amber-950/20 p-3 border border-amber-500/20 rounded-lg text-center">
+                  <p className="text-amber-500 text-[10px] font-medium uppercase flex items-center justify-center gap-1"><HelpCircle size={11}/> Revisar</p>
+                  <p className="text-xl font-bold text-amber-400">{counts.review}</p>
+                </div>
+                <div className="bg-red-950/20 p-3 border border-red-500/20 rounded-lg text-center">
+                  <p className="text-red-500 text-[10px] font-medium uppercase flex items-center justify-center gap-1"><AlertCircle size={11}/> Ignorar</p>
+                  <p className="text-xl font-bold text-red-400">{counts.discard}</p>
+                </div>
               </div>
 
               {counts.discard > 0 && (
-                <div className="flex justify-between items-center bg-zinc-800/30 p-3 rounded-lg border border-zinc-800">
-                    <p className="text-zinc-300 text-sm">{counts.discard} contatos serão ignorados devido a dados inválidos.</p>
-                    <button onClick={exportDiscarded} className="flex items-center gap-2 px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded text-sm text-white transition-colors">
-                        <Download size={14} /> Exportar relatório de erros
-                    </button>
+                <div className="flex justify-between items-center bg-zinc-800/30 p-2.5 rounded-lg border border-zinc-800 text-xs">
+                  <p className="text-zinc-400">{counts.discard} com dados inválidos serão ignorados.</p>
+                  <button onClick={exportDiscarded} className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-700 hover:bg-zinc-600 rounded text-white transition-colors flex-shrink-0 ml-2">
+                    <Download size={12} /> Exportar erros
+                  </button>
                 </div>
               )}
 
-              <div className="border border-zinc-700 rounded-lg overflow-hidden h-[400px] flex flex-col">
-                <table className="w-full text-left text-sm text-zinc-400 sticky top-0">
-                  <thead className="bg-zinc-950 text-zinc-300 text-xs uppercase z-10 w-full shadow-md">
-                    <tr>
-                      <th className="px-4 py-3 w-10">St.</th>
-                      <th className="px-4 py-3">Nome</th>
-                      <th className="px-4 py-3">Telefone (Limpo)</th>
-                      <th className="px-4 py-3">Motivo / Aviso</th>
-                    </tr>
-                  </thead>
-                </table>
-                <div className="overflow-y-auto flex-1">
-                  <table className="w-full text-left text-sm text-zinc-400">
-                    <tbody className="divide-y divide-zinc-800 bg-zinc-900">
-                        {preview.map((row, i) => (
-                        <tr key={i} className={`
-                            ${row.status === 'discard' ? "bg-red-500/5 text-red-100" : ""}
-                            ${row.status === 'review' ? "bg-amber-500/5 text-amber-100" : ""}
-                        `}>
-                            <td className="px-4 py-3 w-10">
-                            {row.status === 'valid' && <CheckCircle2 size={16} className="text-green-500" />}
-                            {row.status === 'review' && <HelpCircle size={16} className="text-amber-500" />}
-                            {row.status === 'discard' && <AlertCircle size={16} className="text-red-500" />}
-                            </td>
-                            <td className="px-4 py-3 font-medium">{row.nome}</td>
-                            <td className="px-4 py-3 font-mono">
-                                <div>{row.telefoneE164 || row.telefoneRaw}</div>
-                                {row.telefoneRaw !== row.telefoneE164 && <div className="text-[10px] opacity-50">Orig: {row.telefoneRaw}</div>}
-                            </td>
-                            <td className="px-4 py-3 text-xs">
-                                {row.reason || '-'}
-                            </td>
-                        </tr>
-                        ))}
-                    </tbody>
-                   </table>
+              <div className="border border-zinc-700 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: 200 }}>
+                <div className="bg-zinc-950 border-b border-zinc-800 grid grid-cols-[28px_1fr_1fr_1fr] text-zinc-400 text-[10px] font-semibold uppercase px-3 py-2 flex-shrink-0">
+                  <span></span>
+                  <span>Nome</span>
+                  <span>Telefone</span>
+                  <span>Aviso</span>
+                </div>
+                <div className="overflow-y-auto divide-y divide-zinc-800/60">
+                  {preview.map((row, i) => (
+                    <div key={i} className={`grid grid-cols-[28px_1fr_1fr_1fr] px-3 py-1.5 text-xs items-center ${
+                      row.status === 'discard' ? 'bg-red-500/5 text-red-300' :
+                      row.status === 'review' ? 'bg-amber-500/5 text-amber-200' :
+                      'text-zinc-300'
+                    }`}>
+                      <span className="flex items-center">
+                        {row.status === 'valid' && <CheckCircle2 size={13} className="text-green-500" />}
+                        {row.status === 'review' && <HelpCircle size={13} className="text-amber-500" />}
+                        {row.status === 'discard' && <AlertCircle size={13} className="text-red-500" />}
+                      </span>
+                      <span className="truncate font-medium">{row.nome}</span>
+                      <span className="truncate font-mono text-[10px]">{row.telefoneE164 || row.telefoneRaw}</span>
+                      <span className="truncate text-[10px] opacity-70">{row.reason || '-'}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
@@ -410,24 +422,22 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
         </div>
 
         {preview.length > 0 && (
-          <div className="p-6 border-t border-zinc-800 bg-zinc-950 flex flex-col gap-4">
-            <div className="flex justify-end gap-3">
-              <button 
-                onClick={() => setPreview([])} 
-                className="px-4 py-2 rounded-lg text-zinc-300 bg-zinc-800 hover:bg-zinc-700 font-medium transition-colors"
-                disabled={importing}
-              >
-                Cancelar
-              </button>
-              <button 
-                onClick={handleImport}
-                disabled={importing || counts.valid + counts.review === 0}
-                className="flex items-center gap-2 px-6 py-2 rounded-lg bg-indigo-600 font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-              >
-                <Upload size={18} />
-                Confirmar {counts.valid + counts.review} importações
-              </button>
-            </div>
+          <div className="px-5 py-4 border-t border-zinc-800 bg-zinc-950 flex justify-end gap-2">
+            <button
+              onClick={() => setPreview([])}
+              className="px-4 py-2 rounded-lg text-zinc-300 bg-zinc-800 hover:bg-zinc-700 font-medium transition-colors text-sm"
+              disabled={importing}
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={importing || counts.valid + counts.review === 0}
+              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-indigo-600 font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors text-sm"
+            >
+              <Upload size={15} />
+              Importar {counts.valid + counts.review}
+            </button>
           </div>
         )}
       </div>

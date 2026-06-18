@@ -16,9 +16,13 @@ async function getCachedSystemSettings() {
       cachedSystemSettings = settingsSnap.data();
     } else {
       cachedSystemSettings = {
-        delayMinMs: 15000,
-        delayMaxMs: 45000,
+        delayMinMs: 35000,
+        delayMaxMs: 90000,
         dailyLimit: 1000,
+        batchSize: 20,
+        batchPauseMs: 60000,
+        enableDispatchSound: true,
+        dispatchSoundUrl: 'https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3',
         openAiModel: 'gpt-4o-mini'
       };
     }
@@ -37,6 +41,29 @@ export function initCampaignWorker() {
   
   const campaignsColl = collection(serverDb, 'campaigns');
   const q = query(campaignsColl, where('status', '==', 'running'));
+
+  // Scheduler: every 30s activates campaigns/paused-resumes that are due
+  setInterval(async () => {
+    try {
+      const now = Date.now();
+      const [scheduledSnap, pausedSnap] = await Promise.all([
+        getDocs(query(collection(serverDb, 'campaigns'), where('status', '==', 'scheduled'))),
+        getDocs(query(collection(serverDb, 'campaigns'), where('status', '==', 'paused')))
+      ]);
+      const due = [...scheduledSnap.docs, ...pausedSnap.docs].filter(d => {
+        const t = d.data().scheduledStartAt;
+        return t && t <= now;
+      });
+      for (const snap of due) {
+        console.log(`[Scheduler] Activating campaign: ${snap.id}`);
+        await updateDoc(snap.ref, { status: 'running', scheduledStartAt: null });
+        await createCampaignLog(snap.id, 'system', 'Agendador', 'Sistema', 'enviado',
+          'Campanha ativada automaticamente pelo agendamento.');
+      }
+    } catch (err) {
+      console.error('[Scheduler] Error checking scheduled campaigns:', err);
+    }
+  }, 30000);
 
   onSnapshot(q, (snapshot) => {
     console.log(`[Campaign Worker] Snapshot received from Firestore campaigns. Found ${snapshot.size} active running campaigns on db.`);
@@ -62,6 +89,61 @@ export function initCampaignWorker() {
 }
 
 /**
+ * Checks if a contact is eligible for receiving a campaign message based on cooldown rules.
+ */
+function canSendCampaign(contact: any, chat: any) {
+  const now = Date.now();
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+  // 1. Check if human takeover is active
+  if (chat?.humanTakeover || contact?.needsReview) {
+      return {
+          allowed: false,
+          reason: 'Atendimento humano ativo ou revisão necessária.',
+          code: 'human_takeover'
+      };
+  }
+
+  // 2. Check if contact is currently in an active SDR interaction
+  if (chat?.sdrProcessing) {
+      return {
+          allowed: false,
+          reason: 'O sistema de IA (SDR) está processando uma resposta agora.',
+          code: 'sdr_busy'
+      };
+  }
+
+  // 3. Check last inbound message (Rule: must be > 7 days ago)
+  const lastInbound = contact.lastInboundAt || chat?.lastInboundAt;
+  if (lastInbound) {
+    const timeSinceInbound = now - lastInbound;
+    if (timeSinceInbound < sevenDaysMs) {
+      const daysLeft = ((sevenDaysMs - timeSinceInbound) / (24 * 60 * 60 * 1000)).toFixed(1);
+      return { 
+        allowed: false, 
+        reason: `Interação recente do cliente há ${daysLeft} dias. Cooldown ativo de 7 dias.`,
+        code: 'cooldown_inbound'
+      };
+    }
+  }
+
+  // 4. Check last campaign sent (Rule: must be > 7 days ago)
+  if (contact.lastCampaignAt) {
+    const timeSinceLastCampaign = now - contact.lastCampaignAt;
+    if (timeSinceLastCampaign < sevenDaysMs) {
+      const daysLeft = ((sevenDaysMs - timeSinceLastCampaign) / (24 * 60 * 60 * 1000)).toFixed(1);
+      return { 
+        allowed: false, 
+        reason: `Já recebeu uma campanha há menos de 7 dias (${daysLeft} dias restantes).`,
+        code: 'cooldown_campaign' 
+      };
+    }
+  }
+
+  return { allowed: true };
+}
+
+/**
  * Executes a specific campaign by scanning its pending queue items and processing them sequentially with delays.
  */
 async function processCampaign(campaignId: string) {
@@ -69,6 +151,7 @@ async function processCampaign(campaignId: string) {
 
   // Fetch campaign details
   const campaignRef = doc(serverDb, 'campaigns', campaignId);
+  let batchCounter = 0; // Local counter for batch pause logic
   
   while (true) {
     // 1. Check campaign status on each step in case of user interaction (e.g. paused)
@@ -89,8 +172,8 @@ async function processCampaign(campaignId: string) {
     // 2. Fetch campaign settings (cached in memory)
     const settings = await getCachedSystemSettings();
 
-    const delayMin = settings.delayMinMs || 15000;
-    const delayMax = settings.delayMaxMs || 45000;
+    const delayMin = settings.delayMinMs || 35000;
+    const delayMax = settings.delayMaxMs || 90000;
     const dailyLimit = settings.dailyLimit || 1000;
 
     // 3. Keep track of daily limits (e.g. check campaigns sent today)
@@ -150,7 +233,17 @@ async function processCampaign(campaignId: string) {
 
     // 5. Verify contact opt-in and active status
     const contactRef = doc(serverDb, 'contacts', queueItem.contactId);
-    const contactSnap = await getDoc(contactRef);
+    
+    // Fetch contact and associated chat (for SDR state)
+    const instanceId = campaign.instanceId || process.env.EVOLUTION_INSTANCE || '3dfans';
+    const parsedPhone = queueItem.telefoneE164.replace(/[^\d]/g, '');
+    const chatIdVal = `${instanceId}:${parsedPhone}`;
+    const chatRef = doc(serverDb, 'chats', chatIdVal);
+
+    const [contactSnap, chatSnap] = await Promise.all([
+        getDoc(contactRef),
+        getDoc(chatRef)
+    ]);
     
     if (!contactSnap.exists()) {
       console.warn(`[Campaign Worker] Processing failed: Contact ID ${queueItem.contactId} does not exist in Firestore.`);
@@ -165,6 +258,30 @@ async function processCampaign(campaignId: string) {
     }
 
     const contact = contactSnap.data();
+    const chat = chatSnap.exists() ? chatSnap.data() : null;
+
+    // --- Cooldown & Eligibility Check ---
+    const eligibility = canSendCampaign(contact, chat);
+    if (!eligibility.allowed) {
+      console.warn(`[Campaign Worker] Skipping contact ${queueItem.nome}: ${eligibility.reason}`);
+      await updateDoc(queueDocRef, { 
+        status: 'falhou', 
+        error: `IGNORADO (Cooldown): ${eligibility.reason}`, 
+        processedAt: Date.now() 
+      });
+      await updateDoc(campaignRef, { 
+        'stats.falhas': increment(1),
+        'stats.aguardando': increment(-1),
+        'stats.ignorados': increment(1)
+      });
+      await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', `Pular: ${eligibility.reason}`);
+      
+      // Small pause to avoid tight loop on ignored contacts
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      continue;
+    }
+    // --- End Check ---
+
     if (!contact.optIn) {
       console.warn(`[Campaign Worker] Processing skipped: Contact "${queueItem.nome}" has optIn set to false.`);
       await updateDoc(queueDocRef, { status: 'falhou', error: 'Contato sem Opt-In ativo', processedAt: Date.now() });
@@ -203,9 +320,15 @@ async function processCampaign(campaignId: string) {
 
     // 7. Send message via Evolution API
     try {
-      const url = (process.env.EVOLUTION_API_URL || 'https://api.3dfans.pro').replace(/\/$/, '');
-      const key = process.env.EVOLUTION_API_KEY || '3dfans123';
-      const instance = process.env.EVOLUTION_INSTANCE || '3dfans';
+      const url = process.env.EVOLUTION_API_URL;
+      const key = process.env.EVOLUTION_API_KEY;
+      const instance = process.env.EVOLUTION_INSTANCE;
+      
+      if (!url || !key || !instance) {
+        throw new Error('Evolution API credentials not configured: EVOLUTION_API_URL, EVOLUTION_API_KEY, and EVOLUTION_INSTANCE must be set in .env');
+      }
+      
+      const baseUrl = url.replace(/\/$/, '');
 
       // telefoneE164 já é um telefone real (vindo do webhook/sync via extractWhatsAppIdentity).
       // NUNCA derivamos telefone de @lid: se o valor contiver @lid, é dado sujo e deve falhar.
@@ -237,29 +360,60 @@ async function processCampaign(campaignId: string) {
         continue;
       }
 
-      // LOG OBRIGATÓRIO: Sending to Evolution API...
-      console.log(`[Campaign Worker] Sending to Evolution API...
-- url: ${url}/message/sendText/${instance}
-- number: ${number}
-- body:`, JSON.stringify({
-          number: number,
-          text: messageText,
-          delay: 1200,
-          linkPreview: false
-        }, null, 2));
+      // 7a. Fetch personalized image if sendImageWithMessage is enabled
+      let imageBase64: string | null = null;
+      let imageMimeType = 'image/jpeg';
 
-      const response = await fetch(`${url}/message/sendText/${instance}`, {
+      if (campaign.sendImageWithMessage) {
+        const apiBase = (campaign.imageReplyApiUrl || 'https://miniaturas.3dfans.pro/api/image-by-phone').replace(/\/$/, '');
+        try {
+          console.log(`[Campaign Worker] Fetching personalized image for ${number}...`);
+          const apiRes = await fetch(`${apiBase}/${encodeURIComponent(number)}`);
+          if (apiRes.ok) {
+            const body = await apiRes.text();
+            let imgUrl = '';
+            try {
+              const j = JSON.parse(body);
+              imgUrl = j.url || j.imageUrl || j.image || j.link || j.data?.url || '';
+            } catch {
+              if (body.trim().startsWith('http')) imgUrl = body.trim();
+            }
+            if (imgUrl) {
+              const imgFetch = await fetch(imgUrl);
+              if (imgFetch.ok) {
+                const buf = await imgFetch.arrayBuffer();
+                imageBase64 = Buffer.from(buf).toString('base64');
+                imageMimeType = imgFetch.headers.get('content-type') || 'image/jpeg';
+                console.log(`[Campaign Worker] Image downloaded (${imageBase64.length} bytes base64, ${imageMimeType})`);
+              }
+            }
+          }
+        } catch (imgErr: any) {
+          console.warn(`[Campaign Worker] Image fetch failed, falling back to text: ${imgErr.message}`);
+        }
+      }
+
+      // LOG OBRIGATÓRIO: Sending to Evolution API...
+      const sendEndpoint = imageBase64
+        ? `${baseUrl}/message/sendMedia/${instance}`
+        : `${baseUrl}/message/sendText/${instance}`;
+      const sendPayload = imageBase64
+        ? { number, mediatype: 'image', mimetype: imageMimeType, media: imageBase64, caption: messageText, delay: 1200 }
+        : { number, text: messageText, delay: 1200, linkPreview: false };
+
+      console.log(`[Campaign Worker] Sending to Evolution API...
+- url: ${sendEndpoint}
+- number: ${number}
+- mode: ${imageBase64 ? 'image+caption' : 'text'}
+- body:`, JSON.stringify(sendPayload, null, 2));
+
+      const response = await fetch(sendEndpoint, {
         method: 'POST',
         headers: {
           'apikey': key,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          number: number,
-          text: messageText,
-          delay: 1200,
-          linkPreview: false
-        })
+        body: JSON.stringify(sendPayload)
       });
 
       const responseText = await response.text();
@@ -318,10 +472,6 @@ async function processCampaign(campaignId: string) {
 
       await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'enviado', 'Mensagem enviada via Evolution API.', remoteMessageId, messageText);
 
-      const instanceId = campaign.instanceId || 'default';
-      const parsedPhone = number.replace(/[^\d]/g, '');
-      const chatIdVal = `${instanceId}:${parsedPhone}`;
-
       // Save Message to system wide messages to let it show up in CRM dashboards
       const msgRef = doc(collection(serverDb, 'messages'), remoteMessageId);
       await setDoc(msgRef, {
@@ -340,7 +490,9 @@ async function processCampaign(campaignId: string) {
 
       // Optionally update CRM contact's lastContactAt timestamp
       await updateDoc(doc(serverDb, 'contacts', queueItem.contactId), {
-        lastContactAt: Date.now()
+        lastContactAt: Date.now(),
+        lastOutboundAt: Date.now(),
+        lastCampaignAt: Date.now()
       });
 
     } catch (apiError: any) {
@@ -376,9 +528,36 @@ async function processCampaign(campaignId: string) {
     }
 
     // 8. Execute anti-ban delay (warmup helper & delay)
-    const randomDelay = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
-    console.log(`[Campaign Worker] Applying anti-ban interval delay of ${randomDelay}ms before next message...`);
-    await new Promise((resolve) => setTimeout(resolve, randomDelay));
+    const settingsPost = await getCachedSystemSettings();
+    const dMin = settingsPost.delayMinMs || 35000;
+    const dMax = settingsPost.delayMaxMs || 90000;
+    const batchSize = settingsPost.batchSize || 20;
+    const batchPause = settingsPost.batchPauseMs || 60000;
+
+    batchCounter++;
+
+    if (batchSize > 0 && batchCounter >= batchSize) {
+      console.log(`[Campaign Worker] Batch limit of ${batchSize} reached. Applying batch pause of ${batchPause}ms...`);
+      await createCampaignLog(campaignId, 'system', 'Worker', 'Segurança', 'enviado', `Pausa de segurança: ${batchPause/1000}s após lote de ${batchSize} disparos.`);
+      
+      // Notify frontend about the pause
+      await updateDoc(campaignRef, {
+        batchPauseUntil: Date.now() + batchPause,
+        batchPauseDuration: batchPause
+      });
+
+      batchCounter = 0; // Reset
+      await new Promise((resolve) => setTimeout(resolve, batchPause));
+
+      // Clear pause status
+      await updateDoc(campaignRef, {
+        batchPauseUntil: null
+      });
+    } else {
+      const randomDelay = Math.floor(Math.random() * (dMax - dMin + 1)) + dMin;
+      console.log(`[Campaign Worker] Applying anti-ban interval delay of ${randomDelay}ms before next message...`);
+      await new Promise((resolve) => setTimeout(resolve, randomDelay));
+    }
   }
 }
 
@@ -391,7 +570,7 @@ async function generateVariatedText(template: string, contact: any): Promise<str
   const cidade = contact.cidade || '';
   
   const geminiKey = process.env.GEMINI_API_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
+  const openaiKey = process.env.OPENROUTER_API_KEY;
 
   const prompt = `Você é um gestor comercial experiente brasileiro personalizando contatos via WhatsApp.
 Mensagem Original a ser variada:
@@ -440,11 +619,11 @@ REGRAS DE SEGURANÇA ANTIBAN:
   if (openaiKey) {
     try {
       const { default: OpenAI } = await import('openai');
-      const openai = new OpenAI({ apiKey: openaiKey });
-      console.log(`[AI Variator] Asking OpenAI gpt-4o-mini for variation...`);
+      const openai = new OpenAI({ apiKey: openaiKey, baseURL: 'https://openrouter.ai/api/v1' });
+      console.log(`[AI Variator] Asking OpenRouter openai/gpt-4o-mini for variation...`);
       const completion = await openai.chat.completions.create({
         messages: [{ role: 'user', content: prompt }],
-        model: 'gpt-4o-mini',
+        model: 'openai/gpt-4o-mini',
         temperature: 0.6,
       });
       const text = completion.choices[0]?.message?.content?.trim();

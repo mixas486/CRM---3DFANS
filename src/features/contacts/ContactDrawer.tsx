@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  X, Save, MessageSquare, Sparkles, User as UserIcon, Tag, Clock, Phone, MapPin, 
-  Loader2, Mail, AlertTriangle, Flame, Compass, ArrowRight, Zap, Target, 
-  CheckCircle2, AlertCircle, RefreshCw, Layers, Sparkle, Heart, DollarSign
+import {
+  X, Save, MessageSquare, Sparkles, User as UserIcon, Tag, Clock, Phone, MapPin,
+  Loader2, Mail, AlertTriangle, Flame, Compass, ArrowRight, Zap, Target,
+  CheckCircle2, AlertCircle, RefreshCw, Layers, Sparkle, Heart, DollarSign,
+  Images, ZoomIn, Download
 } from 'lucide-react';
 import { Contact, ContactStage, Message } from '../../types';
 import { updateContact } from '../../services/firestore';
@@ -20,7 +21,7 @@ const STAGES: ContactStage[] = [
   'Novo Lead', 'Interessado', 'Orçamento Enviado', 'Negociação', 'Cliente', 'Pós-venda'
 ];
 
-type ActiveTab = 'ia' | 'profile';
+type ActiveTab = 'ia' | 'profile' | 'fotos';
 
 export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }) => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('ia');
@@ -99,7 +100,7 @@ export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }
   const { name: leadOrigin, comp: campaignOrigin } = mapOriginAndCampaign();
 
   // --- 2. LEAD SCORE AUTOMATIC SYSTEM ---
-  const hasResponded = messages && messages.length > 0;
+  const hasResponded = messages.some(m => m.direction === 'inbound' || m.fromMe === false);
   const hasPreview = contact.tags.includes('personalizado') || contact.tags.includes('colecionador') || contact.notes?.toLowerCase().includes('preview') || contact.notes?.toLowerCase().includes('mockup') || false;
   const hasAskedQuote = ['Orçamento Enviado', 'Negociação'].includes(contact.stage) || (contact.valorEstimado && contact.valorEstimado > 0) || false;
   const hasPurchased = ['Cliente', 'Pós-venda'].includes(contact.stage) || contact.tags.includes('cliente') || contact.tags.includes('compra') || false;
@@ -339,7 +340,7 @@ export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }
               className={`flex-1 text-center py-2.5 text-xs font-bold uppercase tracking-wider transition-all border-b-2 ${activeTab === 'ia' ? 'text-indigo-400 border-indigo-500 font-extrabold' : 'text-zinc-500 border-transparent hover:text-zinc-300'}`}
             >
               <span className="flex items-center justify-center gap-1.5">
-                <Sparkles size={13} /> Inteligência & IA
+                <Sparkles size={13} /> IA
               </span>
             </button>
             <button
@@ -347,7 +348,20 @@ export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }
               className={`flex-1 text-center py-2.5 text-xs font-bold uppercase tracking-wider transition-all border-b-2 ${activeTab === 'profile' ? 'text-indigo-400 border-indigo-500 font-extrabold' : 'text-zinc-500 border-transparent hover:text-zinc-300'}`}
             >
               <span className="flex items-center justify-center gap-1.5">
-                <Layers size={13} /> Perfil & Timeline
+                <Layers size={13} /> Perfil
+              </span>
+            </button>
+            <button
+              onClick={() => setActiveTab('fotos')}
+              className={`flex-1 text-center py-2.5 text-xs font-bold uppercase tracking-wider transition-all border-b-2 ${activeTab === 'fotos' ? 'text-indigo-400 border-indigo-500 font-extrabold' : 'text-zinc-500 border-transparent hover:text-zinc-300'}`}
+            >
+              <span className="flex items-center justify-center gap-1.5">
+                <Images size={13} /> Fotos
+                {messages.filter(m => m.mediaType === 'image' && !m.fromMe).length > 0 && (
+                  <span className="bg-indigo-500/20 text-indigo-400 text-[9px] font-black px-1.5 rounded-full">
+                    {messages.filter(m => m.mediaType === 'image' && !m.fromMe).length}
+                  </span>
+                )}
               </span>
             </button>
           </div>
@@ -914,6 +928,112 @@ export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }
                   )}
                 </div>
 
+              </motion.div>
+            )}
+
+            {/* TAB 3: FOTOS */}
+            {activeTab === 'fotos' && (
+              <motion.div
+                key="fotos"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+                className="space-y-4"
+              >
+                {(() => {
+                  const contactImages = messages.filter(
+                    m => m.mediaType === 'image' && !m.fromMe && m.mediaUrl
+                  );
+
+                  if (loadingMsgs) {
+                    return (
+                      <div className="flex items-center justify-center py-16">
+                        <Loader2 size={24} className="animate-spin text-indigo-400" />
+                      </div>
+                    );
+                  }
+
+                  if (contactImages.length === 0) {
+                    return (
+                      <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
+                        <Images size={40} className="text-zinc-700" />
+                        <p className="text-zinc-500 text-sm font-medium">Nenhuma foto recebida</p>
+                        <p className="text-zinc-600 text-xs">As imagens enviadas pelo contato aparecerão aqui.</p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
+                          {contactImages.length} {contactImages.length === 1 ? 'foto recebida' : 'fotos recebidas'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {contactImages.map((msg) => {
+                          const date = msg.timestamp
+                            ? new Date(
+                                typeof msg.timestamp === 'number'
+                                  ? msg.timestamp * 1000
+                                  : (msg.timestamp as any)?.seconds
+                                    ? (msg.timestamp as any).seconds * 1000
+                                    : msg.timestamp
+                              )
+                            : null;
+                          const dateStr = date
+                            ? date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+                            : '';
+                          const timeStr = date
+                            ? date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                            : '';
+
+                          return (
+                            <div
+                              key={msg.id}
+                              className="relative group rounded-lg overflow-hidden bg-zinc-900 border border-zinc-800 hover:border-indigo-500/40 transition-all"
+                            >
+                              <img
+                                src={msg.mediaUrl}
+                                alt="Foto do contato"
+                                className="w-full aspect-square object-cover"
+                                loading="lazy"
+                              />
+                              {/* Overlay on hover */}
+                              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
+                                <a
+                                  href={msg.mediaUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold px-2.5 py-1.5 rounded-md transition-colors"
+                                  title="Ver em tamanho original"
+                                >
+                                  <ZoomIn size={11} /> Ver
+                                </a>
+                                <a
+                                  href={msg.mediaUrl}
+                                  download
+                                  className="flex items-center gap-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 text-[10px] font-bold px-2.5 py-1.5 rounded-md transition-colors"
+                                  title="Baixar imagem"
+                                >
+                                  <Download size={11} /> Baixar
+                                </a>
+                              </div>
+                              {/* Timestamp badge */}
+                              {dateStr && (
+                                <div className="absolute bottom-0 left-0 right-0 px-2 py-1 bg-black/70 text-[9px] text-zinc-400 font-mono flex justify-between">
+                                  <span>{dateStr}</span>
+                                  <span>{timeStr}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                })()}
               </motion.div>
             )}
 

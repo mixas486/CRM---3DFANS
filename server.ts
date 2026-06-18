@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -5,6 +6,8 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { extractWhatsAppIdentity } from "./src/utils/whatsappIdentity";
 import { isValidE164BR } from "./src/server/phoneUtils";
+import { initRemoteLogging } from "./src/services/logging/logger";
+import { adminDb } from "./src/server/firebase-admin";
 
 const PORT = 3000;
 
@@ -12,9 +15,9 @@ const PORT = 3000;
 let openaiClient: OpenAI | null = null;
 const initOpenAI = () => {
   if (!openaiClient) {
-    const key = process.env.OPENAI_API_KEY;
+    const key = process.env.OPENROUTER_API_KEY;
     if (key) {
-      openaiClient = new OpenAI({ apiKey: key });
+      openaiClient = new OpenAI({ apiKey: key, baseURL: 'https://openrouter.ai/api/v1' });
     }
   }
   return openaiClient;
@@ -40,6 +43,9 @@ const GenerateRequestSchema = z.object({
 });
 
 async function startServer() {
+  // Initialize Remote Logging
+  await initRemoteLogging();
+
   const app = express();
 
   app.use(express.json({ limit: '50mb' }));
@@ -61,6 +67,29 @@ async function startServer() {
 
   const isValidPhone = (phone: string): boolean => isValidE164BR(phone);
 
+  // Helper function to get Evolution API configuration
+  const getEvolutionConfig = () => {
+    const url = process.env.EVOLUTION_API_URL;
+    const key = process.env.EVOLUTION_API_KEY || '3dfans123';
+    const instance = process.env.EVOLUTION_INSTANCE || '3dfans';
+    
+    if (!url) {
+      throw new Error('Evolution API credentials not configured: EVOLUTION_API_URL must be set in .env');
+    }
+    
+    return {
+      url: url.replace(/\/$/, ''),
+      key,
+      instance
+    };
+  };
+
+  // Helper for Evolution Logging
+  const logEvolution = (action: string, endpoint: string, data?: any) => {
+    console.log(`\n[EVOLUTION ${action}] ${endpoint}`);
+    if (data) console.log(JSON.stringify(data, null, 2));
+  };
+
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
   });
@@ -69,17 +98,10 @@ async function startServer() {
 
   app.get("/api/evolution/chats", async (req, res) => {
     try {
-      const url = process.env.EVOLUTION_API_URL || "https://api.3dfans.pro";
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/chat/findChats/${instance}`;
 
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({ error: "Evolution API credentials not configured" });
-      }
-
-      const response = await fetch(`${url}/chat/findChats/${instance}`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
@@ -97,17 +119,10 @@ async function startServer() {
 
   app.get("/api/evolution/contacts", async (req, res) => {
     try {
-      const url = process.env.EVOLUTION_API_URL || "https://api.3dfans.pro";
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/chat/findContacts/${instance}`;
 
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({ error: "Evolution API credentials not configured" });
-      }
-
-      const response = await fetch(`${url}/chat/findContacts/${instance}`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
@@ -125,17 +140,10 @@ async function startServer() {
 
   app.post("/api/evolution/messages", async (req, res) => {
     try {
-      const url = process.env.EVOLUTION_API_URL || "https://api.3dfans.pro";
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/chat/findMessages/${instance}`;
 
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({ error: "Evolution API credentials not configured" });
-      }
-
-      const response = await fetch(`${url}/chat/findMessages/${instance}`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
@@ -153,15 +161,7 @@ async function startServer() {
 
   app.post("/api/evolution/sendMedia", async (req, res) => {
     try {
-      const url = process.env.EVOLUTION_API_URL || "https://api.3dfans.pro";
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
-
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({ error: "Evolution API credentials not configured" });
-      }
+      const { url, key, instance } = getEvolutionConfig();
 
       const { number, mediatype, media, caption, fileName } = req.body;
       const cleanNumber = normalizePhone(number);
@@ -214,41 +214,33 @@ async function startServer() {
 
   app.post("/api/evolution/create", async (req, res) => {
     try {
-      const url = (
-        process.env.EVOLUTION_API_URL || "https://api.3dfans.pro"
-      ).replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
 
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({
-            error: "Evolution API credentials not configured in backend .env",
-          });
-      }
+      const endpoint = `${url}/instance/create`;
+      const payload = {
+        instanceName: instance,
+        integration: "WHATSAPP-BAILEYS",
+        qrcode: true,
+        token: key // Required in v2.3.7 to enforce matching API Key
+      };
+      logEvolution('REQUEST', `POST ${endpoint}`, payload);
 
-      console.log(`[Backend Proxy] Requesting: POST ${url}/instance/create`);
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), 15000);
-      const response = await fetch(`${url}/instance/create`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          instanceName: instance,
-          integration: "WHATSAPP-BAILEYS",
-          qrcode: true,
-          syncFullHistory: true,
-        }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
       clearTimeout(id);
 
       const data = await response.json().catch(() => ({}));
-      console.log(`[Backend Proxy] Response: ${response.status}`);
+      logEvolution('RESPONSE', `POST ${endpoint} [${response.status}]`, data);
+      
       if (!response.ok && response.status !== 403) {
         // 403 might mean already exists in some evolution versions
         return res
@@ -262,7 +254,7 @@ async function startServer() {
       }
       res.json(data);
     } catch (e: any) {
-      console.error("/api/evolution/create error:", e);
+      logEvolution('ERROR', '/api/evolution/create', e.message);
       if (e.name === "AbortError")
         return res.status(504).json({ error: "Evolution API timeout (15s)" });
       res.status(500).json({ error: e.message || "Error creating instance" });
@@ -343,90 +335,35 @@ async function startServer() {
       };
     });
 
+  // Canonical Webhook Route (matching common Evolution API config)
+  app.post("/webhook/evolution", async (req, res) => {
+    console.log('[WEBHOOK RAW BODY - /webhook/evolution]');
+    console.log(JSON.stringify(req.body, null, 2));
+    await handleEvolutionWebhook(req, res);
+  });
+
   app.post("/api/webhook/evolution", async (req, res) => {
+    console.log('[WEBHOOK RAW BODY - /api/webhook/evolution]');
+    console.log(JSON.stringify(req.body, null, 2));
     await handleEvolutionWebhook(req, res);
   });
 
   app.post("/api/evolution/webhook", async (req, res) => {
+    console.log('[WEBHOOK RAW BODY - /api/evolution/webhook]');
+    console.log(JSON.stringify(req.body, null, 2));
     await handleEvolutionWebhook(req, res);
   });
 
   app.get("/api/evolution/status", async (req, res) => {
     try {
-      const url = (
-        process.env.EVOLUTION_API_URL || "https://api.3dfans.pro"
-      ).replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
-
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({
-            error: "Evolution API credentials not configured in backend .env",
-          });
-      }
-
-      console.log(
-        `[Backend Proxy] Requesting: GET ${url}/instance/connectionState/${instance}`,
-      );
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/instance/connectionState/${instance}`;
+      
+      logEvolution('REQUEST', `GET ${endpoint}`);
+      
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), 15000);
-      const response = await fetch(
-        `${url}/instance/connectionState/${instance}`,
-        {
-          headers: {
-            apikey: key,
-            "Content-Type": "application/json",
-          },
-          signal: controller.signal,
-        },
-      );
-      clearTimeout(id);
-
-      const data = await response.json().catch(() => ({}));
-      console.log(`[Backend Proxy] Response: ${response.status}`);
-      if (!response.ok) {
-        return res
-          .status(response.status)
-          .json({
-            error:
-              data.message ||
-              data.error ||
-              `HTTP Error ${response.status} URL: ${url}`,
-          });
-      }
-      res.json(data);
-    } catch (e: any) {
-      console.error("/api/evolution/status error:", e);
-      if (e.name === "AbortError")
-        return res.status(504).json({ error: "Evolution API timeout (15s)" });
-      res.status(500).json({ error: e.message || "Error fetching status" });
-    }
-  });
-
-  app.get("/api/evolution/connect", async (req, res) => {
-    try {
-      const url = (
-        process.env.EVOLUTION_API_URL || "https://api.3dfans.pro"
-      ).replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
-
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({
-            error: "Evolution API credentials not configured in backend .env",
-          });
-      }
-
-      console.log(
-        `[Backend Proxy] Requesting: GET ${url}/instance/connect/${instance}`,
-      );
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 15000);
-      const response = await fetch(`${url}/instance/connect/${instance}`, {
+      const response = await fetch(endpoint, {
         headers: {
           apikey: key,
           "Content-Type": "application/json",
@@ -436,7 +373,8 @@ async function startServer() {
       clearTimeout(id);
 
       const data = await response.json().catch(() => ({}));
-      console.log(`[Backend Proxy] Response: ${response.status}`);
+      logEvolution('RESPONSE', `GET ${endpoint} [${response.status}]`, data);
+      
       if (!response.ok) {
         return res
           .status(response.status)
@@ -449,7 +387,139 @@ async function startServer() {
       }
       res.json(data);
     } catch (e: any) {
-      console.error("/api/evolution/connect error:", e);
+      logEvolution('ERROR', '/api/evolution/status', e.message);
+      if (e.name === "AbortError")
+        return res.status(504).json({ error: "Evolution API timeout (15s)" });
+      res.status(500).json({ error: e.message || "Error fetching status" });
+    }
+  });
+
+  // Media Proxy to retrieve encrypted WhatsApp media via Evolution API
+  app.get("/api/evolution/media-proxy", async (req, res) => {
+    try {
+      const { instance, msgId } = req.query;
+      if (!instance || !msgId) {
+        return res.status(400).send("Missing instance or msgId");
+      }
+
+      console.log(`[Media Proxy] Request for msgId: ${msgId} in instance: ${instance}`);
+
+      // 1. Get message from Firestore using Admin SDK (bypasses security rules)
+      const msgSnap = await adminDb.collection("messages").doc(String(msgId)).get();
+
+      if (!msgSnap.exists) {
+        console.error(`[Media Proxy] Message ${msgId} not found in Firestore`);
+        return res.status(404).send("Message not found");
+      }
+
+      const msgData = msgSnap.data()!;
+
+      // If message already has a persistent GCS/storage URL, redirect to it
+      const persistentUrl: string = msgData.mediaUrl || '';
+      if (
+        persistentUrl &&
+        !persistentUrl.includes('whatsapp.net') &&
+        !persistentUrl.includes('whatsapp.com')
+      ) {
+        console.log(`[Media Proxy] Redirecting to persistent URL: ${persistentUrl}`);
+        return res.redirect(302, persistentUrl);
+      }
+
+      if (!msgData.messageContent) {
+        console.error(`[Media Proxy] No messageContent found for ${msgId}`);
+        return res.status(404).send("Media content metadata missing");
+      }
+
+      // 2. Call Evolution API to decrypt and get base64
+      const { url, key } = getEvolutionConfig();
+      const endpoint = `${url}/chat/getBase64FromMediaMessage/${instance}`;
+
+      console.log(`[Media Proxy] Calling Evolution API: ${endpoint}`);
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          apikey: key,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ message: msgData.messageContent }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Media Proxy] Evolution API error: ${response.status} ${errText}`);
+        return res.status(502).send("Failed to retrieve media from WhatsApp");
+      }
+
+      const data = await response.json();
+      const base64 = data.base64 || data.data;
+
+      if (!base64) {
+        console.error(`[Media Proxy] No base64 returned from Evolution API`);
+        return res.status(404).send("Media data not returned");
+      }
+
+      // 3. Detect mimetype — messageContent stores { key, message: { audioMessage: {...} } }
+      const mc = msgData.messageContent?.message || msgData.messageContent || {};
+      const mimetype =
+        mc.audioMessage?.mimetype ||
+        mc.imageMessage?.mimetype ||
+        mc.videoMessage?.mimetype ||
+        mc.documentMessage?.mimetype ||
+        mc.stickerMessage?.mimetype ||
+        "audio/ogg; codecs=opus";
+
+      const base64Data = base64.includes(",") ? base64.split(",")[1] : base64;
+      const buffer = Buffer.from(base64Data, "base64");
+
+      res.setHeader("Content-Type", mimetype);
+      res.setHeader("Content-Length", buffer.length);
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.send(buffer);
+
+      console.log(`[Media Proxy] Served ${mimetype} (${buffer.length} bytes) for ${msgId}`);
+
+    } catch (e: any) {
+      console.error("[Media Proxy Error]", e);
+      res.status(500).send(e.message || "Internal Server Error");
+    }
+  });
+
+  app.get("/api/evolution/connect", async (req, res) => {
+    try {
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/instance/connect/${instance}`;
+
+      logEvolution('REQUEST', `GET ${endpoint}`);
+      
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 15000);
+      const response = await fetch(endpoint, {
+        headers: {
+          apikey: key,
+          "Content-Type": "application/json",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(id);
+
+      const data = await response.json().catch(() => ({}));
+      logEvolution('RESPONSE', `GET ${endpoint} [${response.status}]`, data);
+      
+      if (!response.ok) {
+        return res
+          .status(response.status)
+          .json({
+            error:
+              data.message ||
+              data.error ||
+              `HTTP Error ${response.status} URL: ${url}`,
+          });
+      }
+      res.json(data);
+    } catch (e: any) {
+      logEvolution('ERROR', '/api/evolution/connect', e.message);
       if (e.name === "AbortError")
         return res.status(504).json({ error: "Evolution API timeout (15s)" });
       res.status(500).json({ error: e.message || "Error getting QR code" });
@@ -458,26 +528,14 @@ async function startServer() {
 
   app.delete("/api/evolution/logout", async (req, res) => {
     try {
-      const url = (
-        process.env.EVOLUTION_API_URL || "https://api.3dfans.pro"
-      ).replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/instance/logout/${instance}`;
 
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({
-            error: "Evolution API credentials not configured in backend .env",
-          });
-      }
-
-      console.log(
-        `[Backend Proxy] Requesting: DELETE ${url}/instance/logout/${instance}`,
-      );
+      logEvolution('REQUEST', `DELETE ${endpoint}`);
+      
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), 15000);
-      const response = await fetch(`${url}/instance/logout/${instance}`, {
+      const response = await fetch(endpoint, {
         method: "DELETE",
         headers: {
           apikey: key,
@@ -488,13 +546,14 @@ async function startServer() {
       clearTimeout(id);
 
       const data = await response.json().catch(() => ({}));
-      console.log(`[Backend Proxy] Response: ${response.status}`);
+      logEvolution('RESPONSE', `DELETE ${endpoint} [${response.status}]`, data);
+      
       if (!response.ok) {
         return res.status(response.status).json(data);
       }
       res.json(data);
     } catch (e: any) {
-      console.error("/api/evolution/logout error:", e);
+      logEvolution('ERROR', '/api/evolution/logout', e.message);
       if (e.name === "AbortError")
         return res.status(504).json({ error: "Evolution API timeout (15s)" });
       res.status(500).json({ error: e.message || "Error logging out" });
@@ -503,51 +562,48 @@ async function startServer() {
 
   app.post("/api/evolution/sendText", async (req, res) => {
     try {
-      const url = process.env.EVOLUTION_API_URL || "https://api.3dfans.pro";
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
-
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({ error: "Evolution API credentials not configured" });
-      }
+      const { url, key, instance } = getEvolutionConfig();
+      const endpoint = `${url}/message/sendText/${instance}`;
 
       const { number, text, delay, linkPreview } = req.body;
       const cleanNumber = normalizePhone(number);
 
       // Failsafe validation
       if (!isValidPhone(cleanNumber)) {
-        console.error("[Proxy sendText SEND BLOCKED] Invalid phone number:", cleanNumber);
         return res.status(400).json({ 
           success: false, 
           error: `[SEND BLOCKED] O número de telefone "${cleanNumber}" é inválido. Envio para subcontas ou Jid/Lid/Group não permitido. Requer E164 começando com 55 e tamanho mínimo de 12 dígitos.` 
         });
       }
 
-      console.log(`[Proxy sendText] Standardizing and sending:`, {
+      const payload = {
         number: cleanNumber,
-        text,
-        delay,
-        linkPreview
-      });
+        text: text,
+        delay: delay || 1200,
+        linkPreview: linkPreview !== undefined ? linkPreview : false,
+        options: {
+          checkNumber: false,
+          verifyNumber: false
+        }
+      };
+      
+      logEvolution('REQUEST', `POST ${endpoint}`, payload);
 
-      const response = await fetch(`${url}/message/sendText/${instance}`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          number: cleanNumber,
-          text: text,
-          delay: delay || 1200,
-          linkPreview: linkPreview !== undefined ? linkPreview : false
-        }),
+        body: JSON.stringify(payload),
       });
 
       const responseText = await response.text();
-      console.log(`[Proxy sendText Response] Status: ${response.status} Body: ${responseText}`);
+      let data;
+      try { data = JSON.parse(responseText); } catch(e) { data = responseText; }
+      
+      if (!response.ok) logEvolution('ERROR', `POST ${endpoint}`, data);
+      else logEvolution('RESPONSE', `POST ${endpoint} [${response.status}]`, data);
 
       let responseData = {};
       try {
@@ -563,35 +619,44 @@ async function startServer() {
 
   app.post("/api/evolution/set-webhook", async (req, res) => {
     try {
-      const url = (process.env.EVOLUTION_API_URL || "https://api.3dfans.pro").replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
 
       const protocol = req.headers["x-forwarded-proto"] || "https";
       const baseUrl = `${protocol}://${req.headers.host}`;
       const webhookUrl = `${baseUrl}/api/webhook/evolution`;
 
-      console.log(`[Webhook Config] Setting webhook to: ${webhookUrl}`);
+      const endpoint = `${url}/webhook/set/${instance}`;
+      const payload = {
+        webhook: {
+          enabled: true,
+          url: webhookUrl,
+          byEvents: false,
+          base64: false,
+          events: [
+            "MESSAGES_UPSERT",
+            "MESSAGES_UPDATE",
+            "CONTACTS_UPDATE",
+            "CONTACTS_UPSERT",
+            "PRESENCE_UPDATE",
+            "CONNECTION_UPDATE"
+          ]
+        }
+      };
 
-      const response = await fetch(`${url}/webhook/set/${instance}`, {
+      logEvolution('REQUEST', `POST ${endpoint}`, payload);
+
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          enabled: true,
-          url: webhookUrl,
-          webhookByEvents: true,
-          webhookBase64: false,
-          events: [
-            "MESSAGES_UPSERT",
-            "MESSAGES_UPDATE"
-          ]
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = await response.json().catch(() => ({}));
+      logEvolution('RESPONSE', `POST ${endpoint} [${response.status}]`, data);
+
       if (!response.ok) {
         return res.status(response.status).json({
           error: data.message || data.error || `HTTP Error ${response.status}`,
@@ -601,7 +666,7 @@ async function startServer() {
 
       res.json({ success: true, message: "Webhook configurado com sucesso!", data });
     } catch (e: any) {
-      console.error("/api/evolution/set-webhook error:", e);
+      logEvolution('ERROR', '/api/evolution/set-webhook', e.message);
       res.status(500).json({ error: e.message || "Error setting webhook" });
     }
   });
@@ -610,14 +675,13 @@ async function startServer() {
 
   app.get("/api/evolution/healthcheck", async (req, res) => {
     try {
-      const url = (process.env.EVOLUTION_API_URL || "https://api.3dfans.pro").replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
 
       console.log(`[Diagnostic] Healthcheck starting for ${url}`);
 
       // 1. Try fetching status
-      const response = await fetch(`${url}/instance/connectionState/${instance}`, {
+      const endpoint = `${url}/instance/connectionState/${instance}`;
+      const response = await fetch(endpoint, {
         headers: { apikey: key, "Content-Type": "application/json" }
       });
       const data = await response.json().catch(() => ({}));
@@ -644,11 +708,10 @@ async function startServer() {
 
   app.get("/api/evolution/connectionState", async (req, res) => {
     try {
-      const url = (process.env.EVOLUTION_API_URL || "https://api.3dfans.pro").replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
 
-      const response = await fetch(`${url}/instance/connectionState/${instance}`, {
+      const endpoint = `${url}/instance/connectionState/${instance}`;
+      const response = await fetch(endpoint, {
         headers: { apikey: key, "Content-Type": "application/json" }
       });
       const data = await response.json().catch(() => ({}));
@@ -675,9 +738,7 @@ async function startServer() {
 
   app.post("/api/evolution/testSend", async (req, res) => {
     try {
-      const url = (process.env.EVOLUTION_API_URL || "https://api.3dfans.pro").replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+      const { url, key, instance } = getEvolutionConfig();
 
       const { number, text } = req.body;
       const cleanNumber = normalizePhone(number);
@@ -697,18 +758,22 @@ async function startServer() {
 
       console.log(`[Diagnostic testSend] Sending test to number: ${cleanNumber}`);
 
-      const response = await fetch(`${url}/message/sendText/${instance}`, {
+      const endpoint = `${url}/message/sendText/${instance}`;
+      const payload = {
+        number: cleanNumber,
+        text: text,
+        delay: 1200,
+        linkPreview: false,
+        options: { checkNumber: false, verifyNumber: false }
+      };
+
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          number: cleanNumber,
-          text: text,
-          delay: 1200,
-          linkPreview: false
-        })
+        body: JSON.stringify(payload)
       });
 
       const responseText = await response.text();
@@ -804,17 +869,7 @@ async function startServer() {
 
   app.post("/api/evolution/sync-history", async (req, res) => {
     try {
-      const url = (
-        process.env.EVOLUTION_API_URL || "https://api.3dfans.pro"
-      ).replace(/\/$/, "");
-      const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-      const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
-
-      if (!url || !key || !instance) {
-        return res
-          .status(500)
-          .json({ error: "Evolution API credentials not configured" });
-      }
+      const { url, key, instance } = getEvolutionConfig();
 
       console.log(
         `[Sync] Resandboxando/rebootando a instância para forçar sincronização via webhook: ${instance}`
@@ -835,7 +890,9 @@ async function startServer() {
       });
 
       // 2. Trigger restart/reboot of instance in Evolution API to initiate connection lifecycle & full sync events
-      let response = await fetch(`${url}/instance/restart/${instance}`, {
+      const endpoint = `${url}/instance/restart/${instance}`;
+      logEvolution('REQUEST', `POST ${endpoint}`);
+      let response = await fetch(endpoint, {
         method: "POST",
         headers: {
           apikey: key,
@@ -844,10 +901,12 @@ async function startServer() {
       });
 
       if (!response.ok) {
+        const rebootEndpoint = `${url}/instance/reboot/${instance}`;
         console.log(
           `[Sync] Restart falhou com HTTP ${response.status}. Tentando /reboot...`
         );
-        const rebootResponse = await fetch(`${url}/instance/reboot/${instance}`, {
+        logEvolution('REQUEST', `POST ${rebootEndpoint}`);
+        const rebootResponse = await fetch(rebootEndpoint, {
           method: "POST",
           headers: {
             apikey: key,
@@ -873,7 +932,7 @@ async function startServer() {
         `[Sync] Comando de reinicialização aceito. Chats, contatos e mensagens serão carregados via webhooks em background.`
       );
       res.json({ success: true, message: "Reboot efetuado com sucesso." });
-    } catch (e) {
+    } catch (e: any) {
       console.error("/api/evolution/sync-history error:", e);
       res
         .status(500)
@@ -922,9 +981,10 @@ async function startServer() {
       // Executa em background para não travar a porta HTTP e causar "Failed to fetch" no React Timeout
       (async () => {
         try {
-          const url = (process.env.EVOLUTION_API_URL || "https://api.3dfans.pro").replace(/\/$/, "");
-          const key = process.env.EVOLUTION_API_KEY || "3dfans123";
-          const instance = process.env.EVOLUTION_INSTANCE || "3dfans";
+          const { url: evolutionUrl, key: evolutionKey, instance: evolutionInstance } = getEvolutionConfig();
+          const url = evolutionUrl;
+          const key = evolutionKey;
+          const instance = evolutionInstance;
 
       let rawList: any[] = [];
       let isFallback = false;
@@ -1384,7 +1444,7 @@ Esquema JSON Esperado:
       if (!openai) {
         return res.status(500).json({
           error:
-            "OPENAI_API_KEY environment variable is required to generate variations.",
+            "OPENROUTER_API_KEY environment variable is required to generate variations.",
         });
       }
 
@@ -1421,7 +1481,7 @@ Sua tarefa: Reescreva a Mensagem Matriz gerando UMA NOVA variação, mantendo es
 
       const completion = await openai.chat.completions.create({
         messages: [{ role: "user", content: prompt }],
-        model: model || process.env.OPENAI_MODEL || "gpt-4o-mini",
+        model: model || process.env.OPENAI_MODEL || "openai/gpt-4o-mini",
         temperature: 0.4, // Less creative to not distort facts
         response_format: { type: "json_object" },
       });
@@ -1468,7 +1528,7 @@ Sua tarefa: Reescreva a Mensagem Matriz gerando UMA NOVA variação, mantendo es
       if (!openai) {
         return res.status(500).json({
           error:
-            "OPENAI_API_KEY environment variable is required to generate messages.",
+            "OPENROUTER_API_KEY environment variable is required to generate messages.",
         });
       }
 
@@ -1498,7 +1558,7 @@ Retorne APENAS um JSON válido no seguinte formato:
 
       const completion = await openai.chat.completions.create({
         messages: [{ role: "user", content: prompt }],
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        model: process.env.OPENAI_MODEL || "openai/gpt-4o-mini",
         response_format: { type: "json_object" },
       });
 
@@ -1526,6 +1586,76 @@ Retorne APENAS um JSON válido no seguinte formato:
         .json({
           error: e.message || "Internal server error while generating messages",
         });
+    }
+  });
+
+  app.post("/api/analyze-lead", async (req, res): Promise<any> => {
+    try {
+      const { contactId } = req.body;
+      if (!contactId) return res.status(400).json({ error: "Missing contactId" });
+
+      const { serverDb } = await import("./src/server/firebase.ts");
+      const { collection, getDocs, query, orderBy, limit, doc, setDoc, where } = await import("firebase/firestore");
+      const { generateAIResponse } = await import("./src/server/aiProviders.ts");
+
+      // 1. Fetch chat history for this contact
+      const chatsSnapshot = await getDocs(query(collection(serverDb, "chats"), where("contactId", "==", contactId)));
+      
+      let chatId = null;
+      if (!chatsSnapshot.empty) {
+        chatId = chatsSnapshot.docs[0].id;
+      }
+
+      if (!chatId) {
+        return res.json({ status: "nao_analisado", temperature: 0, summary: "Cliente não possui mensagens no CRM." });
+      }
+
+      // Fetch messages
+      const messagesRef = collection(serverDb, "chats", chatId, "messages");
+      const messagesSnap = await getDocs(query(messagesRef, orderBy("timestamp", "asc"), limit(50)));
+      
+      const messages = messagesSnap.docs.map(d => d.data());
+      
+      if (messages.length === 0) {
+        return res.json({ status: "nao_analisado", temperature: 0, summary: "Nenhuma mensagem encontrada." });
+      }
+
+      const conversationText = messages.map(m => `${m.fromMe ? 'VENDEDOR' : 'CLIENTE'}: ${m.text || ''}`).join('\n');
+
+      const systemPrompt = `Você é um analista de CRM expert em vendas. Analise a conversa entre Vendedor e Cliente e retorne um JSON exato:
+{
+  "status": "fechou" | "achou_caro" | "contato_futuro" | "em_negociacao" | "frio",
+  "temperature": numero de 0 a 100 (chance de vender para este cliente. 100 se fechou, 0 se recusou totalmente),
+  "summary": "Resumo muito curto (1 frase) sobre a intenção do cliente e motivo principal."
+}`;
+
+      const prompt = `CONVERSA:\n${conversationText}\n\nRetorne apenas o JSON.`;
+
+      const aiResult = await generateAIResponse(prompt, systemPrompt, 'gemini-2.5-flash');
+      
+      let parsed = { status: "nao_analisado", temperature: 0, summary: "Erro na análise" };
+      try {
+        parsed = JSON.parse(aiResult.response.replace(/```json/g, '').replace(/```/g, '').trim());
+      } catch (e) {
+        console.error("Failed to parse AI response:", aiResult.response);
+      }
+
+      // Save insights to contact
+      const contactRef = doc(serverDb, "contacts", contactId);
+      await setDoc(contactRef, {
+        aiInsights: {
+          status: parsed.status,
+          temperature: parsed.temperature,
+          summary: parsed.summary,
+          lastAnalyzed: Date.now()
+        }
+      }, { merge: true });
+
+      return res.json(parsed);
+
+    } catch (err: any) {
+      console.error("[analyze-lead] Error:", err);
+      return res.status(500).json({ error: err.message });
     }
   });
 

@@ -51,7 +51,7 @@ export const runChatAnalyticsMigration = async () => {
             }
         });
 
-        batch.update(doc(db, 'chats', chatId), {
+        batch.set(doc(db, 'chats', chatId), {
             hasOutbound: outboundCount > 0,
             outboundCount,
             inboundCount,
@@ -61,7 +61,7 @@ export const runChatAnalyticsMigration = async () => {
             firstInboundAt,
             lastMessageDirection,
             repliedAfterOutbound
-        });
+        }, { merge: true });
         count++;
     });
     

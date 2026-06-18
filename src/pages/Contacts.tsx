@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback, useDeferredValue, memo } from 'react';
 import Papa from 'papaparse';
 import { useContacts } from '../hooks/useContacts';
-import { createContact, bulkCreateContacts } from '../services/firestore';
+import { createContact, bulkCreateContacts, subscribeToFolders, createFolder, renameFolder, deleteFolder, moveContactsToFolder, bulkDeleteContacts } from '../services/firestore';
 import { fetchChats } from '../services/evolution';
 import { getAccessToken, googleSignIn, initAuth } from '../services/auth';
 import { fetchGoogleContacts } from '../services/googleContacts';
@@ -10,14 +10,228 @@ import { extractWhatsAppIdentity } from '../utils/whatsappIdentity';
 import { ImportCSVModal } from '../features/contacts/ImportCSVModal';
 import { SyncWhatsAppModal } from '../features/contacts/SyncWhatsAppModal';
 import { ContactDrawer } from '../features/contacts/ContactDrawer';
-import { Contact, ContactStage } from '../types';
-import { Search, Plus, Upload, Filter, Tag, ArrowRight, MoreHorizontal, Loader2, CheckSquare, Square, AlertTriangle, Download, RefreshCw } from 'lucide-react';
+import { Contact, ContactFolder, ContactStage } from '../types';
+import { Search, Plus, Upload, Filter, Tag, ArrowRight, MoreHorizontal, Loader2, CheckSquare, Square, AlertTriangle, Download, RefreshCw, FolderOpen, Folder, FolderPlus, Pencil, Trash2, ChevronDown, Trash, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
+// ── Contact row ───────────────────────────────────────────────────────────────
+const ROW_HEIGHT = 56;
+const PAGE_SIZE  = 50;
+
+interface RowData {
+  contacts: Contact[];
+  selectedIds: Set<string>;
+  toggleSelect: (id: string) => void;
+  openContact: (c: Contact) => void;
+}
+
+type VirtualRowProps = { ariaAttributes?: Record<string, unknown>; index: number; style?: React.CSSProperties } & RowData;
+
+const VirtualRow = memo(({ index, style, contacts, selectedIds, toggleSelect, openContact }: VirtualRowProps) => {
+  const c = contacts[index];
+  if (!c) return null;
+  const sel = selectedIds.has(c.id);
+  return (
+    <div
+      style={style}
+      className={`flex items-center border-b border-zinc-800/60 cursor-pointer transition-colors select-none ${sel ? 'bg-indigo-500/10' : 'hover:bg-zinc-800/40'} ${c.needsReview ? '!bg-amber-950/20' : ''}`}
+      onClick={() => openContact(c)}
+    >
+      <div className="w-12 flex-shrink-0 flex items-center justify-center" onClick={e => { e.stopPropagation(); toggleSelect(c.id); }}>
+        <button className={sel ? 'text-indigo-400' : 'text-zinc-600 hover:text-zinc-400'}>
+          {sel ? <CheckSquare size={17} /> : <Square size={17} />}
+        </button>
+      </div>
+      <div className="flex-1 min-w-0 px-3">
+        <div className="font-medium text-white flex items-center gap-1.5 truncate text-sm">
+          {c.nome}
+          {c.needsReview && <AlertTriangle size={12} className="text-amber-500 flex-shrink-0" />}
+        </div>
+        {c.email && <div className="text-[11px] text-zinc-500 truncate">{c.email}</div>}
+      </div>
+      <div className="w-40 flex-shrink-0 px-3 font-mono text-sm text-zinc-300 truncate">{c.telefoneE164}</div>
+      <div className="w-36 flex-shrink-0 px-3 hidden sm:block">
+        <span className="inline-flex px-2 py-0.5 bg-zinc-800 border border-zinc-700 text-zinc-300 rounded text-xs truncate max-w-full">{c.stage}</span>
+      </div>
+      <div className="w-32 flex-shrink-0 px-3 text-xs text-zinc-400 truncate hidden lg:block">
+        {[c.cidade, c.estado].filter(Boolean).join(' - ') || '-'}
+      </div>
+      <div className="w-28 flex-shrink-0 px-3 text-xs text-zinc-400 hidden md:block">
+        {c.lastContactAt ? new Date(c.lastContactAt).toLocaleDateString('pt-BR') : '-'}
+      </div>
+      <div className="w-14 flex-shrink-0 px-3 flex items-center justify-center">
+        <div className={`w-2.5 h-2.5 rounded-full ${c.optIn ? 'bg-green-500' : 'bg-red-500'}`} />
+      </div>
+      <div className="w-10 flex-shrink-0 flex items-center justify-center text-zinc-500">
+        <MoreHorizontal size={16} />
+      </div>
+    </div>
+  );
+});
+
+// ── Delete modal ──────────────────────────────────────────────────────────────
+interface DeleteModalProps {
+  ids: string[];
+  onClose: () => void;
+  onDone: () => void;
+}
+
+const DeleteModal: React.FC<DeleteModalProps> = ({ ids, onClose, onDone }) => {
+  const [done, setDone] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [finished, setFinished] = useState(false);
+
+  const handleConfirm = async () => {
+    setRunning(true);
+    await bulkDeleteContacts(ids, (d) => setDone(d));
+    setFinished(true);
+    setRunning(false);
+    onDone();
+  };
+
+  const pct = ids.length > 0 ? Math.round((done / ids.length) * 100) : 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 w-full max-w-sm shadow-2xl space-y-5">
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+              <Trash2 size={18} className="text-rose-400" /> Remover Contatos
+            </h3>
+            <p className="text-sm text-zinc-400 mt-1">
+              {finished
+                ? `${ids.length} contato${ids.length !== 1 ? 's' : ''} removido${ids.length !== 1 ? 's' : ''} com sucesso.`
+                : running
+                  ? `Removendo ${done} de ${ids.length}...`
+                  : `Excluir permanentemente ${ids.length} contato${ids.length !== 1 ? 's' : ''}? Esta ação não pode ser desfeita.`}
+            </p>
+          </div>
+          {!running && (
+            <button onClick={onClose} className="text-zinc-500 hover:text-white transition-colors ml-3">
+              <X size={18} />
+            </button>
+          )}
+        </div>
+
+        {(running || finished) && (
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs text-zinc-500">
+              <span>{done} removidos</span>
+              <span>{pct}%</span>
+            </div>
+            <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-rose-500 rounded-full transition-all duration-200"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {!running && !finished && (
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2.5 rounded-xl border border-zinc-700 text-zinc-300 hover:bg-zinc-800 text-sm font-medium transition-colors"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={handleConfirm}
+              className="flex-1 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <Trash2 size={15} /> Confirmar Exclusão
+            </button>
+          </div>
+        )}
+
+        {finished && (
+          <button
+            onClick={onClose}
+            className="w-full px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-medium transition-colors"
+          >
+            Fechar
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 export const ContactsPage: React.FC = () => {
   const { contacts, loading } = useContacts();
   const [search, setSearch] = useState('');
-  
+
+  const deferredSearch = useDeferredValue(search);
+
+  // Delete modal state
+  const [deleteModal, setDeleteModal] = useState<{ open: boolean; ids: string[] }>({ open: false, ids: [] });
+
+  // Folder state
+  const [folders, setFolders] = useState<ContactFolder[]>([]);
+  const [filterFolderId, setFilterFolderId] = useState<string | null>(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renamingValue, setRenamingValue] = useState('');
+  const [page, setPage] = useState(1);
+  const [moveDropdownOpen, setMoveDropdownOpen] = useState(false);
+  const moveDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const unsub = subscribeToFolders(setFolders, console.error);
+    return unsub;
+  }, []);
+
+  // Close move dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (moveDropdownRef.current && !moveDropdownRef.current.contains(e.target as Node)) {
+        setMoveDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const handleCreateFolder = async () => {
+    if (!newFolderName.trim()) return;
+    await createFolder(newFolderName.trim());
+    setNewFolderName('');
+    setCreatingFolder(false);
+  };
+
+  const handleRenameFolder = async (id: string) => {
+    if (!renamingValue.trim()) { setRenamingFolderId(null); return; }
+    await renameFolder(id, renamingValue.trim());
+    setRenamingFolderId(null);
+  };
+
+  const handleDeleteFolder = async (id: string, name: string) => {
+    if (!confirm(`Excluir pasta "${name}"? Os contatos não serão excluídos.`)) return;
+    await deleteFolder(id);
+    if (filterFolderId === id) setFilterFolderId(null);
+  };
+
+  const handleMoveToFolder = async (folderId: string | null) => {
+    await moveContactsToFolder(Array.from(selectedIds), folderId);
+    setMoveDropdownOpen(false);
+    setSelectedIds(new Set());
+  };
+
+  const handleBulkDelete = () => {
+    setDeleteModal({ open: true, ids: Array.from(selectedIds) });
+  };
+
+  const handleRemoveUnnamed = () => {
+    const UNNAMED = new Set(['usuário', 'usuario', 'desconhecido', 'desconhecido (google)', 'desconhecido (wa)', 'unknown', 'anônimo', 'anonimo', '']);
+    const ids = contacts.filter(c => UNNAMED.has((c.nome || '').trim().toLowerCase())).map(c => c.id);
+    if (ids.length === 0) return;
+    setDeleteModal({ open: true, ids });
+  };
+
   useEffect(() => {
     // Inicializa a autenticação silenciosamente para recuperar o accessToken
     initAuth();
@@ -30,7 +244,7 @@ export const ContactsPage: React.FC = () => {
   const [filterEstado, setFilterEstado] = useState<string>('');
   const [filterCidade, setFilterCidade] = useState<string>('');
   
-  const [sortField, setSortField] = useState<'lastContactAt' | 'nome'>('lastContactAt');
+  const [sortField, setSortField] = useState<'lastContactAt' | 'lastMessageAt' | 'nome'>('lastMessageAt');
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -52,8 +266,8 @@ export const ContactsPage: React.FC = () => {
       const contactCidade = c.cidade || '';
 
       // Search
-      if (search) {
-        const s = search.toLowerCase();
+      if (deferredSearch) {
+        const s = deferredSearch.toLowerCase();
         if (
           !contactNome.toLowerCase().includes(s) && 
           !contactPhone.toLowerCase().includes(s) && 
@@ -83,6 +297,9 @@ export const ContactsPage: React.FC = () => {
       if (filterEstado && !contactEstado.toLowerCase().includes(filterEstado.toLowerCase())) return false;
       if (filterCidade && !contactCidade.toLowerCase().includes(filterCidade.toLowerCase())) return false;
 
+      // Pasta
+      if (filterFolderId !== null && c.folderId !== filterFolderId) return false;
+
       return true;
     });
 
@@ -90,15 +307,28 @@ export const ContactsPage: React.FC = () => {
     result.sort((a, b) => {
         if (sortField === 'nome') {
             return (a.nome || '').localeCompare(b.nome || '');
+        } else if (sortField === 'lastMessageAt') {
+            const timeA = Math.max(a.lastInboundAt || 0, a.lastOutboundAt || 0);
+            const timeB = Math.max(b.lastInboundAt || 0, b.lastOutboundAt || 0);
+            return timeB - timeA;
         } else {
             const timeA = a.lastContactAt || 0;
             const timeB = b.lastContactAt || 0;
-            return timeB - timeA; // Descending (most recent first)
+            return timeB - timeA;
         }
     });
 
     return result;
-  }, [contacts, search, filterStage, filterOptIn, filterNeedsReview, filterInactivityDays, filterEstado, filterCidade, sortField]);
+  }, [contacts, deferredSearch, filterStage, filterOptIn, filterNeedsReview, filterInactivityDays, filterEstado, filterCidade, sortField, filterFolderId]);
+
+  const totalPages   = Math.max(1, Math.ceil(filteredContacts.length / PAGE_SIZE));
+  const pagedContacts = useMemo(
+    () => filteredContacts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filteredContacts, page],
+  );
+
+  // Reset to page 1 whenever filters/sort change
+  useEffect(() => setPage(1), [deferredSearch, filterStage, filterOptIn, filterNeedsReview, filterInactivityDays, filterEstado, filterCidade, sortField, filterFolderId]);
 
   // Selection logic
   const toggleSelectAll = () => {
@@ -109,12 +339,15 @@ export const ContactsPage: React.FC = () => {
     }
   };
 
-  const toggleSelect = (id: string) => {
-    const newSet = new Set(selectedIds);
-    if (newSet.has(id)) newSet.delete(id);
-    else newSet.add(id);
-    setSelectedIds(newSet);
-  };
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const openContact = useCallback((c: Contact) => setSelectedContact(c), []);
 
   const selectedWithRestrictions = useMemo(() => {
      let optInFalse = 0;
@@ -134,8 +367,12 @@ export const ContactsPage: React.FC = () => {
         alert('Não é possível adicionar à campanha: alguns contatos selecionados não possuem opt-in ou precisam de revisão.');
         return;
     }
-    console.log('Sending to campaign ids:', Array.from(selectedIds));
-    navigate('/campaigns?audience=selected'); 
+    navigate('/campaigns', { state: { selectedIds: Array.from(selectedIds) } });
+  };
+
+  const handleSelectTop100 = () => {
+    const top100 = filteredContacts.slice(0, 100).map(c => c.id);
+    setSelectedIds(new Set(top100));
   };
 
   const handleExport = () => {
@@ -346,16 +583,100 @@ export const ContactsPage: React.FC = () => {
           >
             <Download size={16} /> Exportar
           </button>
-          <button 
+          <button
             onClick={() => setIsImportModalOpen(true)}
             className="flex-shrink-0 flex items-center gap-2 px-4 py-2 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 rounded-lg text-sm font-medium transition-colors"
           >
             <Upload size={16} /> Importar CSV
           </button>
+          {contacts.some(c => { const n = (c.nome||'').trim().toLowerCase(); return !n || n==='usuário' || n==='usuario' || n==='desconhecido' || n.startsWith('desconhecido ('); }) && (
+            <button
+              onClick={handleRemoveUnnamed}
+              className="flex-shrink-0 flex items-center gap-2 px-4 py-2 bg-rose-900/30 border border-rose-700/50 hover:bg-rose-900/50 text-rose-400 rounded-lg text-sm font-medium transition-colors"
+              title="Remove contatos sem nome ou com nome genérico (Usuário, Desconhecido)"
+            >
+              <Trash size={16} /> Remover sem nome
+            </button>
+          )}
           <button className="flex-shrink-0 flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-colors">
             <Plus size={16} /> Novo Contato
           </button>
         </div>
+      </div>
+
+      {/* Folder Bar */}
+      <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1 hide-scrollbar">
+        {/* "Todos" chip */}
+        <button
+          onClick={() => setFilterFolderId(null)}
+          className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            filterFolderId === null
+              ? 'bg-indigo-600 border-indigo-500 text-white'
+              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500'
+          }`}
+        >
+          <Folder size={12} /> Todos ({contacts.length})
+        </button>
+
+        {/* Folder chips */}
+        {folders.map(f => {
+          const count = contacts.filter(c => c.folderId === f.id).length;
+          const isActive = filterFolderId === f.id;
+          return (
+            <div key={f.id} className={`flex-shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all group ${
+              isActive ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500'
+            }`}>
+              {renamingFolderId === f.id ? (
+                <input
+                  autoFocus
+                  value={renamingValue}
+                  onChange={e => setRenamingValue(e.target.value)}
+                  onBlur={() => handleRenameFolder(f.id)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleRenameFolder(f.id); if (e.key === 'Escape') setRenamingFolderId(null); }}
+                  className="bg-transparent outline-none w-24 text-white"
+                  onClick={e => e.stopPropagation()}
+                />
+              ) : (
+                <button onClick={() => setFilterFolderId(f.id)} className="flex items-center gap-1.5">
+                  <FolderOpen size={12} /> {f.name} <span className="opacity-60">({count})</span>
+                </button>
+              )}
+              <button
+                onClick={e => { e.stopPropagation(); setRenamingFolderId(f.id); setRenamingValue(f.name); }}
+                className="ml-1 opacity-0 group-hover:opacity-70 hover:!opacity-100 transition-opacity"
+                title="Renomear"
+              ><Pencil size={11} /></button>
+              <button
+                onClick={e => { e.stopPropagation(); handleDeleteFolder(f.id, f.name); }}
+                className="opacity-0 group-hover:opacity-70 hover:!opacity-100 transition-opacity text-rose-400"
+                title="Excluir pasta"
+              ><Trash2 size={11} /></button>
+            </div>
+          );
+        })}
+
+        {/* Create folder */}
+        {creatingFolder ? (
+          <div className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border border-indigo-500 bg-indigo-600/10">
+            <FolderPlus size={12} className="text-indigo-400" />
+            <input
+              autoFocus
+              value={newFolderName}
+              onChange={e => setNewFolderName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreateFolder(); if (e.key === 'Escape') { setCreatingFolder(false); setNewFolderName(''); } }}
+              onBlur={() => { if (newFolderName.trim()) handleCreateFolder(); else { setCreatingFolder(false); setNewFolderName(''); } }}
+              placeholder="Nome da pasta..."
+              className="bg-transparent outline-none text-white w-28"
+            />
+          </div>
+        ) : (
+          <button
+            onClick={() => setCreatingFolder(true)}
+            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border border-dashed border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:text-zinc-300 transition-all"
+          >
+            <FolderPlus size={12} /> Nova Pasta
+          </button>
+        )}
       </div>
 
       {/* Filters Bar */}
@@ -441,16 +762,56 @@ export const ContactsPage: React.FC = () => {
                   </span>
               )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-md text-sm font-medium transition-colors flex items-center gap-1">
                <Tag size={14} /> Tags
             </button>
-            <button 
+
+            {/* Move to folder dropdown */}
+            <div className="relative" ref={moveDropdownRef}>
+              <button
+                onClick={() => setMoveDropdownOpen(v => !v)}
+                className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-md text-sm font-medium transition-colors flex items-center gap-1"
+              >
+                <FolderOpen size={14} /> Mover para pasta <ChevronDown size={12} />
+              </button>
+              {moveDropdownOpen && (
+                <div className="absolute left-0 bottom-full mb-1 z-50 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl py-1 min-w-[180px]">
+                  <button
+                    onClick={() => handleMoveToFolder(null)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+                  >
+                    <Folder size={14} /> Sem pasta
+                  </button>
+                  {folders.length > 0 && <div className="border-t border-zinc-800 my-1" />}
+                  {folders.map(f => (
+                    <button
+                      key={f.id}
+                      onClick={() => handleMoveToFolder(f.id)}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
+                    >
+                      <FolderOpen size={14} className="text-indigo-400" /> {f.name}
+                    </button>
+                  ))}
+                  {folders.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-zinc-600">Nenhuma pasta criada</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
               onClick={handleSendToCampaign}
               disabled={!selectedWithRestrictions.canSend}
               className={`px-3 py-1.5 rounded-md text-sm font-bold transition-colors flex items-center gap-1 ${selectedWithRestrictions.canSend ? 'bg-white text-indigo-600 hover:bg-zinc-100' : 'bg-white/50 text-indigo-800 cursor-not-allowed'}`}
             >
               <ArrowRight size={14} /> Enviar p/ Campanha
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 rounded-md text-sm font-bold transition-colors flex items-center gap-1 text-white"
+            >
+              <Trash size={14} /> Remover
             </button>
           </div>
         </div>
@@ -458,12 +819,22 @@ export const ContactsPage: React.FC = () => {
 
       {/* Data Table */}
       <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
-        <div className="bg-zinc-950 border-b border-zinc-800 p-2 flex justify-end gap-2 text-sm text-zinc-400 items-center px-4">
-            Ordernar por: 
-            <select value={sortField} onChange={e => setSortField(e.target.value as any)} className="bg-zinc-900 border-zinc-800 rounded px-2 py-1 focus:outline-none">
-                <option value="lastContactAt">Data Ativ. (Recentes)</option>
-                <option value="nome">Nome (A-Z)</option>
-            </select>
+        <div className="bg-zinc-950 border-b border-zinc-800 p-2 flex justify-between gap-2 text-sm text-zinc-400 items-center px-4">
+            <button
+              onClick={handleSelectTop100}
+              disabled={filteredContacts.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-md text-xs font-medium transition-colors disabled:opacity-40"
+            >
+              <CheckSquare size={14} /> Selecionar 100 mais recentes
+            </button>
+            <div className="flex items-center gap-2">
+              Ordenar por:
+              <select value={sortField} onChange={e => setSortField(e.target.value as any)} className="bg-zinc-900 border-zinc-800 rounded px-2 py-1 focus:outline-none">
+                  <option value="lastMessageAt">Últ. Mensagem (Recentes)</option>
+                  <option value="lastContactAt">Últ. Atividade</option>
+                  <option value="nome">Nome (A-Z)</option>
+              </select>
+            </div>
         </div>
         {loading ? (
           <div className="flex-1 flex flex-col items-center justify-center">
@@ -491,82 +862,105 @@ export const ContactsPage: React.FC = () => {
             )}
           </div>
         ) : (
-          <div className="flex-1 overflow-auto">
-            <table className="w-full text-left text-sm whitespace-nowrap">
-              <thead className="bg-zinc-950 sticky top-0 z-10 border-b border-zinc-800 shadow-sm">
-                <tr className="text-zinc-400 font-medium">
-                  <th className="px-4 py-3 w-12 text-center">
-                    <button onClick={toggleSelectAll} className="text-zinc-500 hover:text-white transition-colors">
-                      {selectedIds.size === filteredContacts.length ? <CheckSquare size={18} /> : <Square size={18} />}
-                    </button>
-                  </th>
-                  <th className="px-4 py-3">Nome</th>
-                  <th className="px-4 py-3">Telefone</th>
-                  <th className="px-4 py-3">Estágio</th>
-                  <th className="px-4 py-3">Localização</th>
-                  <th className="px-4 py-3">Últ. Atividade</th>
-                  <th className="px-4 py-3 text-center">Opt-in</th>
-                  <th className="px-4 py-3 w-12"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/60">
-                {filteredContacts.map(contact => {
-                  const isSelected = selectedIds.has(contact.id);
-                  return (
-                    <tr 
-                      key={contact.id} 
-                      className={`hover:bg-zinc-800/50 transition-colors cursor-pointer ${isSelected ? 'bg-indigo-500/10' : ''} ${contact.needsReview ? 'bg-amber-950/20' : ''}`}
-                      onClick={() => setSelectedContact(contact)}
-                    >
-                      <td className="px-4 py-3 text-center" onClick={(e) => { e.stopPropagation(); toggleSelect(contact.id); }}>
-                        <button className={`transition-colors ${isSelected ? 'text-indigo-400' : 'text-zinc-600 hover:text-zinc-400'}`}>
-                          {isSelected ? <CheckSquare size={18} /> : <Square size={18} />}
-                        </button>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-white flex items-center gap-2">
-                            {contact.nome}
-                            {contact.needsReview && <span title="Revisão pendente"><AlertTriangle size={14} className="text-amber-500" /></span>}
-                        </div>
-                        {contact.email && <div className="text-xs text-zinc-500">{contact.email}</div>}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-zinc-300">
-                          {contact.telefoneE164}
-                          {contact.telefoneRaw !== contact.telefoneE164 && <span className="block text-[10px] text-zinc-500 mt-0.5" title="Original importado">{contact.telefoneRaw}</span>}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="inline-flex px-2 py-1 bg-zinc-800 border border-zinc-700 text-zinc-300 rounded-md text-xs font-medium">
-                          {contact.stage}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-zinc-400">
-                        {contact.cidade || contact.estado ? (
-                          <>
-                            {contact.cidade} {contact.cidade && contact.estado ? '-' : ''} {contact.estado}
-                          </>
-                        ) : '-'}
-                      </td>
-                      <td className="px-4 py-3 text-zinc-400 text-xs">
-                          {contact.lastContactAt ? new Date(contact.lastContactAt).toLocaleDateString() : '-'}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <div className={`inline-block w-2.5 h-2.5 rounded-full ${contact.optIn ? 'bg-green-500' : 'bg-red-500'}`} title={contact.optIn ? 'Permitido' : 'Bloqueado'} />
-                      </td>
-                      <td className="px-4 py-3 text-right text-zinc-500">
-                        <MoreHorizontal size={18} className="inline" />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="flex-1 flex flex-col min-h-0">
+            {/* Header row */}
+            <div className="flex items-center bg-zinc-950 border-b border-zinc-800 text-zinc-400 text-xs font-medium flex-shrink-0" style={{ height: 40 }}>
+              <div className="w-12 flex-shrink-0 flex items-center justify-center">
+                <button onClick={toggleSelectAll} className="text-zinc-500 hover:text-white transition-colors">
+                  {selectedIds.size === filteredContacts.length && filteredContacts.length > 0 ? <CheckSquare size={17} /> : <Square size={17} />}
+                </button>
+              </div>
+              <div className="flex-1 min-w-0 px-3">Nome</div>
+              <div className="w-40 flex-shrink-0 px-3">Telefone</div>
+              <div className="w-36 flex-shrink-0 px-3 hidden sm:block">Estágio</div>
+              <div className="w-32 flex-shrink-0 px-3 hidden lg:block">Localização</div>
+              <div className="w-28 flex-shrink-0 px-3 hidden md:block">Últ. Atividade</div>
+              <div className="w-14 flex-shrink-0 px-3 text-center">Opt-in</div>
+              <div className="w-10 flex-shrink-0" />
+            </div>
+            {/* Paginated list body */}
+            <div className="flex-1 overflow-y-auto">
+              {pagedContacts.map((c, i) => (
+                <VirtualRow
+                  key={c.id}
+                  index={i}
+                  style={{ height: ROW_HEIGHT }}
+                  contacts={pagedContacts}
+                  selectedIds={selectedIds}
+                  toggleSelect={toggleSelect}
+                  openContact={openContact}
+                />
+              ))}
+            </div>
+
+            {/* Pagination controls */}
+            {totalPages > 1 && (
+              <div className="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-2.5 border-t border-zinc-800 bg-zinc-950 text-xs text-zinc-400">
+                <span className="tabular-nums">
+                  {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filteredContacts.length)} de {filteredContacts.length} contatos
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setPage(1)}
+                    disabled={page === 1}
+                    className="px-2 py-1 rounded hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >«</button>
+                  <button
+                    onClick={() => setPage(p => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    className="px-2 py-1 rounded hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >‹</button>
+
+                  {Array.from({ length: totalPages }, (_, i) => i + 1)
+                    .filter(p => p === 1 || p === totalPages || Math.abs(p - page) <= 2)
+                    .reduce<(number | '…')[]>((acc, p, idx, arr) => {
+                      if (idx > 0 && (p as number) - (arr[idx - 1] as number) > 1) acc.push('…');
+                      acc.push(p);
+                      return acc;
+                    }, [])
+                    .map((p, i) =>
+                      p === '…' ? (
+                        <span key={`ellipsis-${i}`} className="px-1 text-zinc-600">…</span>
+                      ) : (
+                        <button
+                          key={p}
+                          onClick={() => setPage(p as number)}
+                          className={`min-w-[28px] px-2 py-1 rounded font-medium transition-colors ${
+                            page === p
+                              ? 'bg-indigo-600 text-white'
+                              : 'hover:bg-zinc-800 text-zinc-400'
+                          }`}
+                        >{p}</button>
+                      )
+                    )}
+
+                  <button
+                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                    disabled={page === totalPages}
+                    className="px-2 py-1 rounded hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >›</button>
+                  <button
+                    onClick={() => setPage(totalPages)}
+                    disabled={page === totalPages}
+                    className="px-2 py-1 rounded hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >»</button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {isImportModalOpen && <ImportCSVModal onClose={() => setIsImportModalOpen(false)} existingContacts={contacts} />}
+      {isImportModalOpen && <ImportCSVModal onClose={() => setIsImportModalOpen(false)} existingContacts={contacts} targetFolderId={filterFolderId} />}
       {isSyncModalOpen && <SyncWhatsAppModal onClose={() => setIsSyncModalOpen(false)} />}
       <ContactDrawer contact={selectedContact} onClose={() => setSelectedContact(null)} />
+      {deleteModal.open && (
+        <DeleteModal
+          ids={deleteModal.ids}
+          onClose={() => setDeleteModal({ open: false, ids: [] })}
+          onDone={() => { setSelectedIds(new Set()); setDeleteModal({ open: false, ids: [] }); }}
+        />
+      )}
     </div>
   );
 };

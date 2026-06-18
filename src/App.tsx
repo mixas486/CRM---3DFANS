@@ -16,6 +16,13 @@ import { Settings } from './pages/Settings';
 import { Dashboard } from './pages/Dashboard';
 import { AIControl } from './pages/AIControl';
 import { AIAgentConfig } from './pages/AIAgentConfig';
+import PreviewsPage from './pages/admin/Previews';
+import AIUsagePage from './pages/admin/AIUsage';
+import ClientInsights from './pages/admin/ClientInsights';
+import SystemLogs from './pages/admin/SystemLogs';
+import Orcamentos from './pages/Orcamentos';
+import Analytics from './pages/Analytics';
+import AIPreview from './pages/AIPreview';
 
 export default function App() {
   return (
@@ -34,7 +41,13 @@ export default function App() {
               <Route path="/inbox" element={<InboxPage />} />
               <Route path="/ai" element={<AIControl />} />
               <Route path="/admin/ai-agent" element={<AIAgentConfig />} />
-              <Route path="/analytics" element={<div className="p-8 text-zinc-400">Em breve: Analytics Premium.</div>} />
+              <Route path="/admin/previews" element={<PreviewsPage />} />
+              <Route path="/admin/ai-usage" element={<AIUsagePage />} />
+              <Route path="/admin/insights" element={<ClientInsights />} />
+              <Route path="/admin/logs" element={<SystemLogs />} />
+              <Route path="/orcamentos" element={<Orcamentos />} />
+              <Route path="/analytics" element={<Analytics />} />
+              <Route path="/ai-preview" element={<AIPreview />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

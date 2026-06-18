@@ -1,6 +1,6 @@
 import { collection, doc, setDoc, updateDoc, deleteDoc, query, where, orderBy, limit, onSnapshot, writeBatch, getDocs, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Contact, Message } from '../types';
+import { Contact, ContactFolder, Message } from '../types';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
 import { extractBrazilGeo } from '../utils/brazilGeo';
 
@@ -43,6 +43,19 @@ export const createMessageRecord = async (data: Omit<Message, 'id'>) => {
 export const deleteContact = async (id: string) => {
   const docRef = doc(db, 'contacts', id);
   await deleteDoc(docRef);
+};
+
+export const bulkDeleteContacts = async (
+  ids: string[],
+  onProgress?: (done: number, total: number) => void
+): Promise<void> => {
+  const CHUNK = 50;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    ids.slice(i, i + CHUNK).forEach(id => batch.delete(doc(db, 'contacts', id)));
+    await batch.commit();
+    onProgress?.(Math.min(i + CHUNK, ids.length), ids.length);
+  }
 };
 
 export const bulkCreateContacts = async (contacts: Omit<Contact, 'id' | 'createdAt'>[]) => {
@@ -105,6 +118,55 @@ export const subscribeToContacts = (
   );
 };
 
+// ── Contact Folders ──────────────────────────────────────────────────────────
+
+const foldersCollection = collection(db, 'contact_folders');
+
+export const subscribeToFolders = (
+  callback: (folders: ContactFolder[]) => void,
+  onError: (err: any) => void
+) => {
+  const q = query(foldersCollection, orderBy('createdAt', 'asc'));
+  return onSnapshot(q, snap => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() }) as ContactFolder));
+  }, onError);
+};
+
+export const createFolder = async (name: string): Promise<string> => {
+  const ref = doc(foldersCollection);
+  await setDoc(ref, { name: name.trim(), createdAt: Date.now() });
+  return ref.id;
+};
+
+export const renameFolder = async (id: string, name: string): Promise<void> => {
+  await updateDoc(doc(db, 'contact_folders', id), { name: name.trim() });
+};
+
+export const deleteFolder = async (id: string): Promise<void> => {
+  // Unassign contacts in this folder first
+  const q = query(contactsCollection, where('folderId', '==', id));
+  const snap = await getDocs(q);
+  if (!snap.empty) {
+    const batch = writeBatch(db);
+    snap.docs.forEach(d => batch.update(d.ref, { folderId: null }));
+    await batch.commit();
+  }
+  await deleteDoc(doc(db, 'contact_folders', id));
+};
+
+export const moveContactsToFolder = async (contactIds: string[], folderId: string | null): Promise<void> => {
+  const CHUNK = 450;
+  for (let i = 0; i < contactIds.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    contactIds.slice(i, i + CHUNK).forEach(id => {
+      batch.update(doc(db, 'contacts', id), { folderId: folderId ?? null });
+    });
+    await batch.commit();
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const subscribeToContactMessages = (
   contactId: string, 
   callback: (messages: Message[]) => void,
@@ -149,6 +211,12 @@ export const getSettings = async (): Promise<any> => {
     delayMaxMs: 90000,
     dailyLimit: 1000,
     warmupLimit: 50,
+    batchSize: 20,
+    batchPauseMs: 60000,
+    enableDispatchSound: true,
+    dispatchSoundUrl: 'https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3',
+    enableReplySound: false,
+    replySoundUrl: '',
     pauseOnHighFailureRate: true,
     openAiModel: 'gpt-4o-mini',
     optOutKeywords: ['sair', 'parar', 'cancelar'],

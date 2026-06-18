@@ -3,7 +3,22 @@ import { getSettings, updateSettings, subscribeToSettings } from '../services/fi
 import { createInstanceItem, getConnectionState, connectInstance, logoutInstance, syncHistory, setWebhook } from '../services/evolution';
 import { subscribeToSyncStatus, SyncStatus } from '../services/inbox';
 import { Settings as SettingsType, Template } from '../types';
-import { Save, Server, Shield, BrainCircuit, MessageSquareText, Plus, Trash2, Edit2, Loader2, RefreshCw, QrCode, PowerOff, PlusCircle, MapPin, Zap } from 'lucide-react';
+import { Save, Server, Shield, BrainCircuit, MessageSquareText, Plus, Trash2, Edit2, Loader2, RefreshCw, QrCode, PowerOff, PlusCircle, MapPin, Zap, Volume2, Play } from 'lucide-react';
+
+const DISPATCH_SOUNDS = [
+  { id: 1,  label: 'Sino suave',        url: 'https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3' },
+  { id: 2,  label: 'Ping digital',      url: 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3' },
+  { id: 3,  label: 'Pop mensagem',      url: 'https://assets.mixkit.co/active_storage/sfx/2578/2578-preview.mp3' },
+  { id: 4,  label: 'Notificação leve',  url: 'https://assets.mixkit.co/active_storage/sfx/2959/2959-preview.mp3' },
+  { id: 5,  label: 'Alerta suave',      url: 'https://assets.mixkit.co/active_storage/sfx/2867/2867-preview.mp3' },
+  { id: 6,  label: 'Caixa registradora',url: 'https://assets.mixkit.co/active_storage/sfx/1427/1427-preview.mp3' },
+  { id: 7,  label: 'Teclado click',     url: 'https://assets.mixkit.co/active_storage/sfx/2832/2832-preview.mp3' },
+  { id: 8,  label: 'Bolha',             url: 'https://assets.mixkit.co/active_storage/sfx/2961/2961-preview.mp3' },
+  { id: 9,  label: 'Fanfarra curta',    url: 'https://assets.mixkit.co/active_storage/sfx/2017/2017-preview.mp3' },
+  { id: 10, label: 'Whoosh',            url: 'https://assets.mixkit.co/active_storage/sfx/2886/2886-preview.mp3' },
+  { id: 11, label: 'Acorde positivo',   url: 'https://assets.mixkit.co/active_storage/sfx/2222/2222-preview.mp3' },
+  { id: 12, label: 'Sem som',           url: '' },
+] as const;
 import { runGeoMigration } from '../utils/geoMigration';
 import { runChatAnalyticsMigration } from '../utils/crmMigration';
 import { QRCodeSVG } from 'qrcode.react';
@@ -592,6 +607,163 @@ export const Settings = () => {
                         onChange={e => setLocalSettings(prev => prev ? { ...prev, warmupLimit: parseInt(e.target.value) || 0 } : null)}
                         className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
                     />
+               </div>
+               <div>
+                    <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1">Pausa a cada X (Batch)</label>
+                    <input
+                        type="number"
+                        min="0"
+                        placeholder="Ex: 10"
+                        value={localSettings.batchSize || ''}
+                        onChange={e => setLocalSettings(prev => prev ? { ...prev, batchSize: parseInt(e.target.value) || 0 } : null)}
+                        className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                    />
+               </div>
+               <div>
+                    <label className="block text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1">Tempo de Pausa (ms)</label>
+                    <input
+                        type="number"
+                        min="0"
+                        placeholder="Ex: 60000"
+                        value={localSettings.batchPauseMs || ''}
+                        onChange={e => setLocalSettings(prev => prev ? { ...prev, batchPauseMs: parseInt(e.target.value) || 0 } : null)}
+                        className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                    />
+               </div>
+            </div>
+
+            <div className="mt-6 pt-6 border-t border-zinc-800 space-y-4">
+               <div className="flex items-center justify-between">
+                 <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                   <input
+                     type="checkbox"
+                     checked={localSettings.enableDispatchSound}
+                     onChange={(e) => setLocalSettings(prev => prev ? { ...prev, enableDispatchSound: e.target.checked } : null)}
+                     className="w-4 h-4 rounded appearance-none border border-zinc-500 checked:bg-indigo-500 checked:border-indigo-500 focus:ring-indigo-500/50 bg-zinc-800 cursor-pointer flex-shrink-0
+                          checked:after:content-[''] checked:after:block checked:after:w-1.5 checked:after:h-2.5 checked:after:border-r-2 checked:after:border-b-2 checked:after:border-white checked:after:transform checked:after:rotate-45 checked:after:ml-1"
+                   />
+                   <Volume2 size={15} className="text-indigo-400" />
+                   Alarme Sonoro de Disparo
+                 </label>
+                 {localSettings.dispatchSoundUrl && (
+                   <button
+                     onClick={() => { new Audio(localSettings.dispatchSoundUrl).play().catch(() => {}); }}
+                     className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs transition-colors"
+                   >
+                     <Play size={12} /> Testar selecionado
+                   </button>
+                 )}
+               </div>
+
+               {localSettings.enableDispatchSound && (
+                 <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                   {DISPATCH_SOUNDS.map(s => {
+                     const isSelected = (localSettings.dispatchSoundUrl || '') === s.url;
+                     return (
+                       <div
+                         key={s.id}
+                         onClick={() => setLocalSettings(prev => prev ? { ...prev, dispatchSoundUrl: s.url } : null)}
+                         className={`relative group flex flex-col items-center justify-center p-3 rounded-xl border cursor-pointer transition-all text-center gap-2 ${
+                           isSelected
+                             ? 'border-indigo-500 bg-indigo-500/15 text-white'
+                             : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+                         }`}
+                       >
+                         {s.url ? (
+                           <button
+                             onClick={e => { e.stopPropagation(); new Audio(s.url).play().catch(() => {}); }}
+                             className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 bg-zinc-800 rounded hover:bg-indigo-600 text-zinc-400 hover:text-white"
+                           >
+                             <Play size={9} />
+                           </button>
+                         ) : null}
+                         <Volume2 size={18} className={isSelected ? 'text-indigo-400' : 'text-zinc-600'} />
+                         <span className="text-[10px] font-medium leading-tight">{s.label}</span>
+                         {isSelected && <span className="absolute top-1 left-1.5 w-1.5 h-1.5 rounded-full bg-indigo-400" />}
+                       </div>
+                     );
+                   })}
+                 </div>
+               )}
+
+               <div>
+                 <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1 ml-1">URL personalizada (MP3/WAV)</label>
+                 <input
+                   type="text"
+                   value={localSettings.dispatchSoundUrl || ''}
+                   onChange={e => setLocalSettings(prev => prev ? { ...prev, dispatchSoundUrl: e.target.value } : null)}
+                   placeholder="https://.../sound.mp3"
+                   className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                 />
+               </div>
+
+               {/* ── Alerta sonoro de resposta ── */}
+               <div className="pt-5 border-t border-zinc-800/60 space-y-4">
+                 <div className="flex items-center justify-between">
+                   <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                     <input
+                       type="checkbox"
+                       checked={localSettings.enableReplySound ?? false}
+                       onChange={e => setLocalSettings(prev => prev ? { ...prev, enableReplySound: e.target.checked } : null)}
+                       className="w-4 h-4 rounded appearance-none border border-zinc-500 checked:bg-emerald-500 checked:border-emerald-500 focus:ring-emerald-500/50 bg-zinc-800 cursor-pointer flex-shrink-0
+                            checked:after:content-[''] checked:after:block checked:after:w-1.5 checked:after:h-2.5 checked:after:border-r-2 checked:after:border-b-2 checked:after:border-white checked:after:transform checked:after:rotate-45 checked:after:ml-1"
+                     />
+                     <Volume2 size={15} className="text-emerald-400" />
+                     Alerta Sonoro de Resposta (contato respondeu)
+                   </label>
+                   {localSettings.replySoundUrl && (
+                     <button
+                       onClick={() => { new Audio(localSettings.replySoundUrl!).play().catch(() => {}); }}
+                       className="flex items-center gap-1.5 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs transition-colors"
+                     >
+                       <Play size={12} /> Testar selecionado
+                     </button>
+                   )}
+                 </div>
+
+                 {localSettings.enableReplySound && (
+                   <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                     {DISPATCH_SOUNDS.map(s => {
+                       const isSelected = (localSettings.replySoundUrl || '') === s.url;
+                       return (
+                         <div
+                           key={s.id}
+                           onClick={() => setLocalSettings(prev => prev ? { ...prev, replySoundUrl: s.url } : null)}
+                           className={`relative group flex flex-col items-center justify-center p-3 rounded-xl border cursor-pointer transition-all text-center gap-2 ${
+                             isSelected
+                               ? 'border-emerald-500 bg-emerald-500/15 text-white'
+                               : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+                           }`}
+                         >
+                           {s.url ? (
+                             <button
+                               onClick={e => { e.stopPropagation(); new Audio(s.url).play().catch(() => {}); }}
+                               className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 bg-zinc-800 rounded hover:bg-emerald-600 text-zinc-400 hover:text-white"
+                             >
+                               <Play size={9} />
+                             </button>
+                           ) : null}
+                           <Volume2 size={18} className={isSelected ? 'text-emerald-400' : 'text-zinc-600'} />
+                           <span className="text-[10px] font-medium leading-tight">{s.label}</span>
+                           {isSelected && <span className="absolute top-1 left-1.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+                         </div>
+                       );
+                     })}
+                   </div>
+                 )}
+
+                 {localSettings.enableReplySound && (
+                   <div>
+                     <label className="block text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1 ml-1">URL personalizada (MP3/WAV)</label>
+                     <input
+                       type="text"
+                       value={localSettings.replySoundUrl || ''}
+                       onChange={e => setLocalSettings(prev => prev ? { ...prev, replySoundUrl: e.target.value } : null)}
+                       placeholder="https://.../reply-alert.mp3"
+                       className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                     />
+                   </div>
+                 )}
                </div>
             </div>
 

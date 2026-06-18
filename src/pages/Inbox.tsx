@@ -162,65 +162,78 @@ const AudioPlayer = ({ url, isOut }: { url?: string; isOut: boolean }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [loadError, setLoadError] = useState(false);
+  const [loading, setLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    if (url) {
-      const audio = new Audio(url);
-      audioRef.current = audio;
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+    setLoadError(false);
 
-      const handleLoadedMetadata = () => {
-        setDuration(audio.duration || 0);
-      };
+    if (!url) return;
 
-      const handleTimeUpdate = () => {
-        setCurrentTime(audio.currentTime || 0);
-      };
+    setLoading(true);
+    const audio = new Audio();
+    audio.preload = 'metadata';
+    audioRef.current = audio;
 
-      const handleEnded = () => {
-        setIsPlaying(false);
-        setCurrentTime(0);
-      };
+    const handleLoadedMetadata = () => {
+      setDuration(isFinite(audio.duration) ? audio.duration : 0);
+      setLoading(false);
+    };
+    const handleTimeUpdate = () => setCurrentTime(audio.currentTime || 0);
+    const handleEnded = () => { setIsPlaying(false); setCurrentTime(0); };
+    const handleError = () => { setLoadError(true); setLoading(false); };
+    const handleCanPlay = () => setLoading(false);
 
-      audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.addEventListener('timeupdate', handleTimeUpdate);
-      audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
+    audio.addEventListener('canplay', handleCanPlay);
 
-      audio.load();
+    audio.src = url;
+    audio.load();
 
-      return () => {
-        audio.pause();
-        audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-        audio.removeEventListener('timeupdate', handleTimeUpdate);
-        audio.removeEventListener('ended', handleEnded);
-      };
-    }
+    return () => {
+      audio.pause();
+      audio.src = '';
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('error', handleError);
+      audio.removeEventListener('canplay', handleCanPlay);
+    };
   }, [url]);
 
-  const togglePlay = () => {
-    if (!audioRef.current) return;
+  const togglePlay = async () => {
+    if (!audioRef.current || loadError) return;
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play().catch((err) => console.warn('Audio play block:', err));
-      setIsPlaying(true);
+      try {
+        await audioRef.current.play();
+        setIsPlaying(true);
+      } catch (err) {
+        console.warn('Audio play failed:', err);
+        setLoadError(true);
+      }
     }
   };
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!audioRef.current || duration === 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const width = rect.width;
-    const clickPercent = Math.min(Math.max(clickX / width, 0), 1);
-    const newTime = clickPercent * duration;
-    audioRef.current.currentTime = newTime;
-    setCurrentTime(newTime);
+    const clickPercent = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+    audioRef.current.currentTime = clickPercent * duration;
+    setCurrentTime(clickPercent * duration);
   };
 
   const formatTime = (time: number) => {
-    if (isNaN(time)) return '0:00';
+    if (!isFinite(time) || isNaN(time)) return '0:00';
     const mins = Math.floor(time / 60);
     const secs = Math.floor(time % 60);
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
@@ -233,56 +246,81 @@ const AudioPlayer = ({ url, isOut }: { url?: string; isOut: boolean }) => {
     return Array.from({ length: barsCount }).map(() => Math.max(4, Math.random() * 20));
   }, []);
 
+  if (!url) {
+    return (
+      <div className="flex items-center gap-2 py-1 opacity-50 text-[11px]">
+        <FileAudio size={16} />
+        <span>Áudio indisponível</span>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="flex items-center gap-2 py-1">
+        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 opacity-50 ${isOut ? 'bg-white/20' : 'bg-zinc-700'}`}>
+          <Play size={16} className="fill-current" />
+        </div>
+        <div className="flex flex-col flex-1 min-w-[140px]">
+          <span className="text-[11px] opacity-60">Áudio não pôde ser carregado</span>
+          {url && (
+            <a href={url} target="_blank" rel="noreferrer" className="text-[10px] underline opacity-50 hover:opacity-80">
+              Abrir link direto
+            </a>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-center gap-3 py-1">
-      <button 
+      <button
         onClick={togglePlay}
-        className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all ${
-          isOut 
-            ? 'bg-white text-indigo-600 hover:scale-105 hover:bg-zinc-100 shadow-md' 
+        disabled={loading}
+        className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-all disabled:opacity-60 ${
+          isOut
+            ? 'bg-white text-indigo-600 hover:scale-105 hover:bg-zinc-100 shadow-md'
             : 'bg-indigo-600 hover:scale-105 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/10'
         }`}
       >
-        {isPlaying ? <Pause size={18} className="fill-current" /> : <Play size={18} className="fill-current ml-1" />}
+        {loading
+          ? <Loader2 size={16} className="animate-spin" />
+          : isPlaying
+            ? <Pause size={18} className="fill-current" />
+            : <Play size={18} className="fill-current ml-1" />}
       </button>
-      
+
       <div className="flex flex-col flex-1 min-w-[140px]">
-        <div 
+        <div
           onClick={handleSeek}
           className="flex items-center gap-0.5 h-6 cursor-pointer relative group"
         >
           {heights.map((h, i) => {
-            const barProgress = (i / barsCount) * 150;
             const isFilled = (i / barsCount) * 100 <= progress;
             return (
-              <div 
-                key={i} 
+              <div
+                key={i}
                 className={`w-[3px] rounded-full transition-all duration-150 ${
-                  isFilled 
-                    ? isOut ? 'bg-white' : 'bg-indigo-500' 
+                  isFilled
+                    ? isOut ? 'bg-white' : 'bg-indigo-500'
                     : isOut ? 'bg-white/30' : 'bg-zinc-600'
                 }`}
-                style={{ 
-                  height: `${h}px`,
-                  transform: isPlaying && (i / barsCount) * 100 <= progress ? `scaleY(${1.1 + Math.sin(Date.now() / 150 + i) * 0.15})` : 'none' 
-                }}
+                style={{ height: `${h}px` }}
               />
             );
           })}
         </div>
-        
+
         <div className="flex justify-between text-[10px] font-mono font-medium opacity-70 mt-1">
           <span>{formatTime(currentTime)}</span>
-          <span>{duration > 0 ? formatTime(duration) : '0:00'}</span>
+          <span>{duration > 0 ? formatTime(duration) : '–:––'}</span>
         </div>
       </div>
 
-      {url && (
-        <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-transparent relative overflow-hidden ml-1">
-          <div className="absolute inset-0 bg-gradient-to-tr from-indigo-500/20 to-purple-500/20 animate-pulse" />
-          <Mic size={16} className={isOut ? 'text-white' : 'text-indigo-400'} />
-        </div>
-      )}
+      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 bg-transparent relative overflow-hidden ml-1">
+        <Mic size={14} className={isOut ? 'text-white/60' : 'text-indigo-400/60'} />
+      </div>
     </div>
   );
 };
@@ -335,12 +373,26 @@ const ImageBubble = ({ url }: { url: string }) => {
 
 const MessageBubble = React.memo(({ msg, isOut, showTail }: { msg: any, isOut: boolean, showTail: boolean }) => {
     // Detect types from Firestore fields or text fallbacks
-    const isAudio = msg.mediaType === 'audio' || msg.messageType === 'audioMessage' || msg.body?.startsWith('[AUDIO]');
-    const isImage = msg.mediaType === 'image' || msg.messageType === 'imageMessage' || msg.body?.startsWith('[IMAGE]');
+    const isAudio = msg.mediaType === 'audio' || msg.messageType === 'audioMessage' || msg.body?.startsWith('[AUDIO]') || msg.body?.startsWith('[ÁUDIO]') || msg.body?.startsWith('[AUDIO]');
+    const isImage = msg.mediaType === 'image' || msg.messageType === 'imageMessage' || msg.body?.startsWith('[IMAGE]') || msg.body?.startsWith('[IMAGEM]');
     const isVideo = msg.mediaType === 'video' || msg.messageType === 'videoMessage' || msg.body?.startsWith('[VIDEO]');
-    const isSticker = msg.mediaType === 'sticker' || msg.messageType === 'stickerMessage' || msg.body?.startsWith('[STICKER]');
+    const isSticker = msg.mediaType === 'sticker' || msg.messageType === 'stickerMessage' || msg.body?.startsWith('[STICKER]') || msg.body?.startsWith('[FIGURINHA]');
     const isDocument = msg.mediaType === 'document' || msg.messageType === 'documentMessage' || msg.body?.startsWith('[DOCUMENTO]') || msg.body?.startsWith('[DOCUMENT]');
     
+    // Helper to handle proxy for encrypted WhatsApp URLs
+    const getFinalMediaUrl = (url?: string) => {
+        if (!url) return '';
+        // If it's already a proxy URL or a base64, return as is
+        if (url.startsWith('/api/evolution/media-proxy') || url.startsWith('data:')) return url;
+        // If it's a WhatsApp encrypted URL, point to our proxy
+        if (url.includes('whatsapp.net') || url.includes('whatsapp.com')) {
+             return `/api/evolution/media-proxy?instance=${msg.instanceId || msg.instance || '3dfans'}&msgId=${msg.id}`;
+        }
+        return url;
+    };
+
+    const mediaUrl = getFinalMediaUrl(msg.mediaUrl);
+
     return (
         <motion.div 
             initial={{ opacity: 0, y: 10, scale: 0.98 }}
@@ -362,19 +414,19 @@ const MessageBubble = React.memo(({ msg, isOut, showTail }: { msg: any, isOut: b
 
                 {isImage ? (
                     <>
-                       <ImageBubble url={msg.mediaUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=400&auto=format&fit=crop'} />
-                       <span className="text-[15px] leading-relaxed whitespace-pre-wrap block font-normal text-left">{msg.body?.replace('[IMAGE]', '').trim() || ''}</span>
+                       <ImageBubble url={mediaUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=400&auto=format&fit=crop'} />
+                       <span className="text-[15px] leading-relaxed whitespace-pre-wrap block font-normal text-left">{msg.body?.replace('[IMAGE]', '').replace('[IMAGEM]', '').trim() || ''}</span>
                     </>
                 ) : isAudio ? (
-                    <AudioPlayer url={msg.mediaUrl} isOut={isOut} />
+                    <AudioPlayer url={mediaUrl} isOut={isOut} />
                 ) : isVideo ? (
                     <div className="rounded-xl overflow-hidden mb-1">
-                       <video src={msg.mediaUrl} controls className="max-w-[280px] rounded-xl outline-none" />
+                       <video src={mediaUrl} controls className="max-w-[280px] rounded-xl outline-none" />
                        <span className="text-[15px] leading-relaxed whitespace-pre-wrap block font-normal text-left mt-1">{msg.body?.replace('[VIDEO]', '').trim() || ''}</span>
                     </div>
                 ) : isSticker ? (
                     <div className="max-w-[120px] rounded-lg overflow-hidden my-1">
-                       <img src={msg.mediaUrl} alt="Sticker" className="w-full h-auto object-contain" />
+                       <img src={mediaUrl} alt="Sticker" className="w-full h-auto object-contain" />
                     </div>
                 ) : isDocument ? (
                     <div className="flex items-center gap-3 bg-zinc-900/60 p-3 rounded-xl border border-zinc-700/50 my-1 min-w-[220px]">
@@ -383,7 +435,7 @@ const MessageBubble = React.memo(({ msg, isOut, showTail }: { msg: any, isOut: b
                         <p className="text-xs font-semibold truncate text-white">{msg.body?.replace('[DOCUMENTO]', '').replace('[DOCUMENT]', '').trim() || 'Documento'}</p>
                         <span className="text-[9px] text-zinc-400 font-mono">Clique para baixar</span>
                       </div>
-                      <a href={msg.mediaUrl} target="_blank" rel="noreferrer" className="p-2 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500 hover:text-white rounded-lg transition-colors shrink-0">
+                      <a href={mediaUrl} target="_blank" rel="noreferrer" className="p-2 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500 hover:text-white rounded-lg transition-colors shrink-0">
                         <Download size={14} />
                       </a>
                     </div>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { Users, Trello, Megaphone, Inbox, Settings, LogOut, MessageSquare, Send, Activity, LayoutDashboard, Bot, Power, Sparkles } from 'lucide-react';
+import { Users, Trello, Megaphone, Inbox, Settings, LogOut, MessageSquare, Send, Activity, LayoutDashboard, Bot, Power, Sparkles, Image as ImageIcon, BarChart2, TrendingUp, Terminal, FileText } from 'lucide-react';
 import { getConnectionState } from '../services/evolution';
 import { subscribeToConnectionStatus } from '../services/firestore';
 import { subscribeToQuotaError } from '../utils/firestoreErrorHandler';
@@ -83,7 +83,12 @@ export const Layout: React.FC = () => {
     { to: '/campaigns', label: 'Campanhas', icon: <Megaphone size={20} /> },
     { to: '/pipeline', label: 'Funil', icon: <Trello size={20} /> },
     { to: '/ai', label: agentConfig?.agentName ? `IA: ${agentConfig.agentName}` : 'Agente IA', icon: <Bot size={20} /> },
+    { to: '/orcamentos', label: 'Orçamentos', icon: <FileText size={20} /> },
+    { to: '/admin/previews', label: 'Previews IA', icon: <ImageIcon size={20} /> },
+    { to: '/admin/insights', label: 'Análise de Leads', icon: <TrendingUp size={20} /> },
     { to: '/admin/ai-agent', label: 'Config Agente', icon: <Sparkles size={20} /> },
+    { to: '/admin/ai-usage', label: 'Custo IA', icon: <BarChart2 size={20} /> },
+    { to: '/admin/logs', label: 'Logs do Sistema', icon: <Terminal size={20} /> },
     { to: '/analytics', label: 'Analytics', icon: <Activity size={20} /> },
     { to: '/settings', label: 'Configurações', icon: <Settings size={20} /> },
   ];

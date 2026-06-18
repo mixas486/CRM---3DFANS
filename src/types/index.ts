@@ -6,6 +6,12 @@ export type ContactStage =
   | 'Cliente'
   | 'Pós-venda';
 
+export interface ContactFolder {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
 export interface Contact {
   id: string;
   nome: string;
@@ -29,8 +35,13 @@ export interface Contact {
   intentDetected?: string;
   stageChangedAt?: number;
   lastContactAt: number | null;
+  lastInboundAt?: number | null;
+  lastOutboundAt?: number | null;
+  lastCampaignAt?: number | null;
+  repliedAfterOutbound?: boolean;
   notes: string;
   createdAt: number;
+  folderId?: string;
 }
 
 export interface Campaign {
@@ -41,7 +52,16 @@ export interface Campaign {
     tags?: string[];
     stages?: ContactStage[];
   };
-  status: 'draft' | 'running' | 'paused' | 'completed' | 'error';
+  status: 'draft' | 'running' | 'paused' | 'completed' | 'error' | 'scheduled';
+  scheduledStartAt?: number | null;
+  enableImageReply?: boolean;
+  sendImageWithMessage?: boolean;
+  imageReplyApiUrl?: string;
+  enableAutoReply?: boolean;
+  autoReplyText?: string;
+  autoReplyImageUrl?: string;
+  batchPauseUntil?: number | null;
+  batchPauseDuration?: number;
   startedAt?: number;
   startedBy?: string;
   stats: {
@@ -49,6 +69,7 @@ export interface Campaign {
     entregues: number;
     falhas: number;
     respondidos: number;
+    ignorados?: number;
     lido?: number;
     aguardando?: number;
   };
@@ -60,9 +81,18 @@ export interface Message {
   contactId: string;
   direction: 'inbound' | 'outbound';
   body: string;
+  text?: string;
   mediaUrl?: string;
+  mediaType?: string;
+  mimeType?: string;
+  fromMe?: boolean;
   timestamp: number;
+  createdAt?: number;
   status: 'sent' | 'delivered' | 'read' | 'failed' | 'received';
+  chatId?: string;
+  remoteJid?: string;
+  instance?: string;
+  instanceId?: string;
 }
 
 export interface Template {
@@ -80,6 +110,12 @@ export interface Settings {
   dailyLimit: number;
   warmupLimit: number;
   pauseOnHighFailureRate: boolean;
+  batchSize?: number;
+  batchPauseMs?: number;
+  enableDispatchSound?: boolean;
+  dispatchSoundUrl?: string;
+  enableReplySound?: boolean;
+  replySoundUrl?: string;
   openAiModel: string;
   optOutKeywords: string[];
   templates: Template[];

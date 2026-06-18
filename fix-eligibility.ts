@@ -21,7 +21,7 @@ async function fixEligibility() {
     updates.needsReview = false;
     updates.optIn = true;
     
-    batch.update(doc(db, 'contacts', docSnap.id), updates);
+    batch.set(doc(db, 'contacts', docSnap.id), updates, { merge: true });
     batchCounter++;
     if (batchCounter === 450) {
        await batch.commit();

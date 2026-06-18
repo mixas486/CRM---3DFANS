@@ -17,10 +17,10 @@ export const runGeoMigration = async () => {
         
         const { ddd, state } = extractBrazilGeo(data.telefoneE164 || '');
         if (ddd || state) {
-            batch.update(doc(db, 'contacts', docSnap.id), {
+            batch.set(doc(db, 'contacts', docSnap.id), {
                 ddd,
                 estado: state || data.estado
-            });
+            }, { merge: true });
             count++;
         }
     });
