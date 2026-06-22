@@ -35,13 +35,17 @@ export const AIAgentConfig: React.FC = () => {
         ttsVoice: 'nova' as TTSVoice,
         ttsProvider: 'openai' as TTSProvider,
         elevenLabsVoiceId: '',
+        elevenLabsSpeed: 0.92,
+        elevenLabsStability: 0.65,
+        elevenLabsSimilarityBoost: 0.80,
+        elevenLabsStyle: 0.15,
     });
 
     useEffect(() => {
         const configRef = doc(db, 'system', 'config', 'settings', 'aiAgent');
         const unsub = onSnapshot(configRef, (snap) => {
             if (snap.exists()) {
-                setConfig(snap.data() as any);
+                setConfig(prev => ({ ...prev, ...snap.data() }));
             }
             setLoading(false);
         });
@@ -270,20 +274,53 @@ export const AIAgentConfig: React.FC = () => {
                                         </div>
                                     )}
 
-                                    {/* ElevenLabs voice ID */}
+                                    {/* ElevenLabs voice ID + settings */}
                                     {config.ttsProvider === 'elevenlabs' && (
-                                        <div className="space-y-2">
-                                            <label className="text-xs text-zinc-500 font-medium ml-1">Voice ID (ElevenLabs)</label>
-                                            <input
-                                                type="text"
-                                                value={config.elevenLabsVoiceId}
-                                                onChange={(e) => setConfig({ ...config, elevenLabsVoiceId: e.target.value })}
-                                                placeholder="Ex: EXAVITQu4vr4xnSDxMaL"
-                                                className="w-full bg-black border border-zinc-800 rounded-xl px-4 py-3 text-white font-mono text-sm focus:outline-none focus:border-purple-500 transition-colors"
-                                            />
-                                            <p className="text-[10px] text-zinc-600 ml-1">
-                                                Encontre o Voice ID no painel ElevenLabs → Voices → clique na voz → copie o ID.
-                                            </p>
+                                        <div className="space-y-4">
+                                            <div className="space-y-2">
+                                                <label className="text-xs text-zinc-500 font-medium ml-1">Voice ID (ElevenLabs)</label>
+                                                <input
+                                                    type="text"
+                                                    value={config.elevenLabsVoiceId}
+                                                    onChange={(e) => setConfig({ ...config, elevenLabsVoiceId: e.target.value })}
+                                                    placeholder="Ex: EXAVITQu4vr4xnSDxMaL"
+                                                    className="w-full bg-black border border-zinc-800 rounded-xl px-4 py-3 text-white font-mono text-sm focus:outline-none focus:border-purple-500 transition-colors"
+                                                />
+                                                <p className="text-[10px] text-zinc-600 ml-1">
+                                                    Encontre o Voice ID no painel ElevenLabs → Voices → clique na voz → copie o ID.
+                                                </p>
+                                            </div>
+
+                                            {/* Voice settings sliders */}
+                                            <div className="pt-3 border-t border-zinc-800 space-y-4">
+                                                <p className="text-xs text-zinc-400 font-semibold uppercase tracking-widest">Parâmetros de Voz</p>
+
+                                                {([
+                                                    { key: 'elevenLabsSpeed',           label: 'Velocidade (speed)',              min: 0.7,  max: 1.2,  step: 0.01, hint: '0.7 = lento · 1.0 = normal · 1.2 = rápido' },
+                                                    { key: 'elevenLabsStability',        label: 'Estabilidade (stability)',        min: 0,    max: 1,    step: 0.01, hint: 'Baixo = mais expressivo · Alto = mais consistente' },
+                                                    { key: 'elevenLabsSimilarityBoost',  label: 'Similaridade (similarity_boost)', min: 0,    max: 1,    step: 0.01, hint: 'Quanto mais alto, mais fiel ao clone de voz' },
+                                                    { key: 'elevenLabsStyle',            label: 'Estilo (style)',                  min: 0,    max: 1,    step: 0.01, hint: 'Exagera a entonação — usar com moderação' },
+                                                ] as const).map(({ key, label, min, max, step, hint }) => (
+                                                    <div key={key} className="space-y-1.5">
+                                                        <div className="flex justify-between items-center">
+                                                            <label className="text-xs text-zinc-400 font-medium ml-1">{label}</label>
+                                                            <span className="text-xs text-purple-400 font-mono font-bold">
+                                                                {Number((config as any)[key] ?? 0).toFixed(2)}
+                                                            </span>
+                                                        </div>
+                                                        <input
+                                                            type="range"
+                                                            min={min}
+                                                            max={max}
+                                                            step={step}
+                                                            value={(config as any)[key] ?? 0}
+                                                            onChange={(e) => setConfig({ ...config, [key]: parseFloat(e.target.value) })}
+                                                            className="w-full accent-purple-500"
+                                                        />
+                                                        <p className="text-[10px] text-zinc-600 ml-1">{hint}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
                                         </div>
                                     )}
 

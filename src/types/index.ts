@@ -42,6 +42,8 @@ export interface Contact {
   notes: string;
   createdAt: number;
   folderId?: string;
+  profilePicUrl?: string;
+  avatar?: string;
 }
 
 export interface Campaign {

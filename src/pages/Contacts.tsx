@@ -553,10 +553,10 @@ export const ContactsPage: React.FC = () => {
   return (
     <div className="h-full flex flex-col">
       {/* Page Header / Topbar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-        <div>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 md:mb-6">
+        <div className="hidden md:block">
           <h2 className="text-2xl font-bold tracking-tight text-white mb-1">Contatos</h2>
-          <p className="text-zinc-400 text-sm">
+          <p className="text-[#94A3B8] text-sm">
             {loading ? 'Carregando...' : `${filteredContacts.length} contatos encontrados.`}
           </p>
         </div>

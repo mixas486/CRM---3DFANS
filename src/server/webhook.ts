@@ -50,9 +50,10 @@ export async function handleEvolutionWebhook(req: any, res: any) {
     const event = rawEvent.toLowerCase().replace(/_/g, '.');
     console.log(`[EVENT TYPE] Raw: ${rawEvent} -> Normalized: ${event} | Instance: ${instance}`);
 
-    // CORRIGIR EVENT FILTER: Somente messages.upsert pode processar mídia e SDR
-    if (event !== 'messages.upsert') {
-      console.log('[WEBHOOK] Ignored non-upsert event', event);
+    // Accept any message-upsert variant: messages.upsert, message.upsert, messages_upsert, etc.
+    const isMessageUpsert = event.includes('message') && event.includes('upsert');
+    if (!isMessageUpsert) {
+      console.log('[WEBHOOK] Ignored non-message-upsert event', event);
       return res.sendStatus(200);
     }
 
@@ -149,14 +150,28 @@ async function ensureContactExists(
 
   const contactsRef = collection(serverDb, 'contacts');
 
-  const q = query(
-    contactsRef,
-    where('telefoneE164', '==', phoneE164)
-  );
+  // Candidate phone numbers to check (e.g. with and without 9th digit for BR numbers)
+  const phoneCandidates = [phoneE164];
+  if (!isLid && phoneDigits.startsWith('55') && phoneDigits.length >= 12 && phoneDigits.length <= 13) {
+      const stripped = phoneDigits.slice(2);
+      const with9 = stripped.length === 10 ? stripped.slice(0, 2) + '9' + stripped.slice(2) : stripped;
+      const without9 = stripped.length === 11 && stripped[2] === '9' ? stripped.slice(0, 2) + stripped.slice(3) : stripped;
+      if (`+55${with9}` !== phoneE164) phoneCandidates.push(`+55${with9}`);
+      if (`+55${without9}` !== phoneE164) phoneCandidates.push(`+55${without9}`);
+  }
 
-  const snap = await getDocs(q);
+  let existingDoc = null;
+  
+  for (const candidate of phoneCandidates) {
+      const q = query(contactsRef, where('telefoneE164', '==', candidate));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+          existingDoc = snap.docs[0];
+          break;
+      }
+  }
 
-  if (snap.empty) {
+  if (!existingDoc) {
 
     const newRef = doc(contactsRef);
 
@@ -187,7 +202,6 @@ async function ensureContactExists(
     return newRef.id;
   }
 
-  const existingDoc = snap.docs[0];
   const existingId = existingDoc.id;
   const existingData = existingDoc.data();
 
@@ -436,19 +450,25 @@ async function handleMessageUpsert(data: any, baseUrl: string, instance?: string
       let mediaBuffer: Buffer | undefined;
       if (mediaType === 'image') {
           try {
-              mediaBuffer = await downloadIncomingMedia(msgData);
-              
-              const { publicUrl } = await persistIncomingMedia({
-                  buffer: mediaBuffer,
-                  chatId,
-                  contactId,
-                  mimeType: mimeType || 'image/jpeg',
-                  customerPhone: realPhone
-              });
-              
-              finalMediaUrl = publicUrl;
+              // getBase64FromMediaMessage expects { key, message } not the full webhook payload
+              const msgPayload = { key: msgData.key || {}, message: msgData.message || {} };
+              try {
+                  mediaBuffer = await getEvolutionMedia(msgPayload);
+                  console.log('[MEDIA] Full-quality image fetched via Evolution API');
+              } catch (fullQualityErr) {
+                  console.warn('[MEDIA] Full-quality fetch failed, using thumbnail fallback:', fullQualityErr);
+                  mediaBuffer = await downloadIncomingMedia(msgData);
+              }
+
+              if (mediaBuffer && mediaBuffer.length > 0) {
+                  // Use uploadToGCS (Firebase Admin SDK, public: true) — avoids GCS ACL issues
+                  const ext = (mimeType || 'image/jpeg').split('/')[1] || 'jpg';
+                  const gcsPath = `media/images/${chatId}/${msgId}.${ext}`;
+                  finalMediaUrl = await uploadToGCS(mediaBuffer, gcsPath, mimeType || 'image/jpeg');
+                  console.log('[MEDIA] Image uploaded to GCS:', finalMediaUrl);
+              }
           } catch (mediaErr) {
-              console.error('[MEDIA ERROR] Immediate persistence failed', mediaErr);
+              console.error('[MEDIA ERROR] Image persistence failed:', mediaErr);
           }
       }
 
@@ -509,35 +529,25 @@ async function handleMessageUpsert(data: any, baseUrl: string, instance?: string
         sender: remoteJid
       });
 
-      // Ensure chat document exists before any message or media operations
+      // Read existing chat state (single getDoc — no pre-create needed)
       const chatRef = doc(collection(serverDb, 'chats'), chatId);
-      await setDoc(chatRef, { id: chatId, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true });
-
       const chatSnap = await getDoc(chatRef);
-      const chatSnapData = chatSnap.data();
+      const chatSnapData = chatSnap.data() || {};
 
-      let unreadCount = 0;
-
-      if (!fromMe) {
-        unreadCount = chatSnap.exists()
-          ? (chatSnap.data().unreadCount || 0) + 1
-          : 1;
-      }
-
-      else {
-        unreadCount = chatSnap.exists()
-          ? (chatSnap.data().unreadCount || 0)
-          : 0;
-      }
-
-      const existingChatName = chatSnap.data()?.pushName || chatSnap.data()?.contactName;
+      const existingChatName = chatSnapData.pushName || chatSnapData.contactName;
       const contactName = (pushName && pushName.trim()) ? pushName.trim() : (existingChatName || 'Contato');
 
+      const unreadCount = fromMe
+        ? (chatSnapData.unreadCount || 0)
+        : (chatSnapData.unreadCount || 0) + 1;
+
+      // Single atomic write — always includes lastMessageAt so the chat is
+      // immediately visible in orderBy('lastMessageAt','desc') queries.
       await setDoc(
         chatRef,
         {
           id: chatId,
-          contactId: contactId, // Store contactId in chat doc for SDR
+          contactId: contactId,
           remoteJid: remoteJid,
           telefoneE164: phoneE164,
           pushName: contactName,
@@ -546,26 +556,37 @@ async function handleMessageUpsert(data: any, baseUrl: string, instance?: string
           lastMessageAt: serverTimestamp(),
           instanceId: instance,
           updatedAt: serverTimestamp(),
+          ...(!chatSnap.exists() ? { createdAt: serverTimestamp() } : {}),
+          ...(msgData.profilePicUrl ? { profilePicUrl: msgData.profilePicUrl } : {}),
           ...(fromMe ? {
             hasOutbound: true,
             outboundCount: increment(1),
             lastOutboundAt: serverTimestamp(),
             lastMessageDirection: 'outbound',
-            ...(!chatSnap.data()?.firstOutboundAt ? { firstOutboundAt: serverTimestamp() } : {}),
-            ...(!chatSnap.data()?.firstInboundAt ? {} : {})
+            ...(!chatSnapData.firstOutboundAt ? { firstOutboundAt: serverTimestamp() } : {}),
           } : {
             inboundCount: increment(1),
             lastInboundAt: serverTimestamp(),
             lastMessageDirection: 'inbound',
-            ...(!chatSnap.data()?.firstInboundAt ? { firstInboundAt: serverTimestamp() } : {}),
-            ...(chatSnap.data()?.hasOutbound ? { repliedAfterOutbound: true } : {})
+            ...(!chatSnapData.firstInboundAt ? { firstInboundAt: serverTimestamp() } : {}),
+            ...(chatSnapData.hasOutbound ? { repliedAfterOutbound: true } : {}),
           })
         },
         { merge: true }
       );
 
-      if (!fromMe && chatSnap.data()?.hasOutbound && !chatSnap.data()?.repliedAfterOutbound && contactId) {
+      if (!fromMe && chatSnapData.hasOutbound && !chatSnapData.repliedAfterOutbound && contactId) {
         await setDoc(doc(serverDb, 'contacts', contactId), { repliedAfterOutbound: true }, { merge: true });
+      }
+
+      // Campaign image reply trigger
+      let handledByCampaign = false;
+      if (!fromMe && contactId && realPhone && !isLid) {
+          handledByCampaign = await triggerCampaignImageReply(contactId, `+${realPhone}`, instance || '3dfans')
+              .catch((e: unknown) => {
+                  console.error('[CAMPAIGN IMAGE REPLY ERROR]', e);
+                  return false;
+              }) as boolean;
       }
 
       const shouldRunSDR = resolveSDRState(chatSnapData, systemConfig as any);
@@ -575,10 +596,15 @@ async function handleMessageUpsert(data: any, baseUrl: string, instance?: string
           fromMe,
           shouldRunSDR,
           chatExists: chatSnap.exists(),
-          globalSDREnabled: systemConfig?.globalSDREnabled
+          globalSDREnabled: systemConfig?.globalSDREnabled,
+          chatSdrEnabled: chatSnapData.sdrEnabled,
+          humanTakeover: chatSnapData.humanTakeover,
+          handledByCampaign,
+          telefoneE164: phoneE164,
+          remoteJid: remoteJid
       });
 
-      if (!fromMe && shouldRunSDR) {
+      if (!handledByCampaign && !fromMe && shouldRunSDR) {
           try {
               console.log('[SDR TRIGGER] Attempting to run SDR Engine', { chatId, mediaType });
               const mod = await import('./sdrEngine');
@@ -589,12 +615,6 @@ async function handleMessageUpsert(data: any, baseUrl: string, instance?: string
               console.error('[runAI CRASH STACK]', runSdrError?.stack);
               console.error('[runAI CRASH FULL]', JSON.stringify(runSdrError, null, 2));
           }
-      }
-
-      // Campaign image reply trigger (fire-and-forget)
-      if (!fromMe && contactId && realPhone && !isLid) {
-          triggerCampaignImageReply(contactId, `+${realPhone}`, instance || '3dfans')
-              .catch((e: unknown) => console.error('[CAMPAIGN IMAGE REPLY ERROR]', e));
       }
 
       console.log('[CHAT UPSERT]', chatId);
@@ -723,30 +743,104 @@ async function handleConnectionUpdate(data: any) {
  *  2. Sends personalized image from API if enableImageReply is set
  *  3. Sends configurable auto-reply text/image if enableAutoReply is set
  */
-async function triggerCampaignImageReply(contactId: string, phoneE164: string, instance: string): Promise<void> {
-  if (!phoneE164 || phoneE164.startsWith('lid:')) return;
+async function triggerCampaignImageReply(contactId: string, phoneE164: string, instance: string): Promise<boolean> {
+  if (!phoneE164 || phoneE164.startsWith('lid:')) return false;
 
   const number = phoneE164.replace(/\D/g, '');
-  if (!number || number.length < 10) return;
+  if (!number || number.length < 10) return false;
 
-  const windowMs = 1 * 60 * 60 * 1000;
-  const cutoff = Timestamp.fromMillis(Date.now() - windowMs);
+  const windowMs = 7 * 24 * 60 * 60 * 1000;
+  const cutoffTime = Date.now() - windowMs;
 
-  const queueSnap = await getDocs(
-    query(
-      collection(serverDb, 'campaign_queue'),
-      where('contactId', '==', contactId),
-      where('status', '==', 'enviado'),
-      where('processedAt', '>=', cutoff.toMillis()),
-      orderBy('processedAt', 'desc'),
-      limit(5)
-    )
+  // Normalise Firestore Timestamp / plain number / missing field → milliseconds
+  const toMs = (v: any): number => {
+    if (!v) return 0;
+    if (typeof v === 'number') return v;
+    if (typeof v.toMillis === 'function') return v.toMillis();
+    if (typeof v.seconds === 'number') return v.seconds * 1000;
+    return 0;
+  };
+
+  // Build phone variants to try (handles BR 9th-digit format differences)
+  const phoneVariants = new Set<string>([phoneE164, number]);
+  if (number.startsWith('55') && (number.length === 12 || number.length === 13)) {
+    const stripped = number.slice(2); // remove BR country code
+    if (stripped.length === 10) {
+      // WhatsApp sent without 9th digit → also try with 9th digit
+      const with9 = `55${stripped.slice(0, 2)}9${stripped.slice(2)}`;
+      phoneVariants.add(`+${with9}`);
+      phoneVariants.add(with9);
+    } else if (stripped.length === 11 && stripped[2] === '9') {
+      // WhatsApp sent with 9th digit → also try without 9th digit
+      const without9 = `55${stripped.slice(0, 2)}${stripped.slice(3)}`;
+      phoneVariants.add(`+${without9}`);
+      phoneVariants.add(without9);
+    }
+  }
+
+  // ── Query 1: by contactId (fastest — direct Firestore doc ID match)
+  let allQueueSnap = await getDocs(
+    query(collection(serverDb, 'campaign_queue'), where('contactId', '==', contactId))
   );
-  if (queueSnap.empty) return;
+  console.log(`[CAMPAIGN REPLY] contactId=${contactId} → ${allQueueSnap.size} queue doc(s)`);
+
+  // ── Fallback Queries: by phone variants (handles contactId mismatches and 9th-digit differences)
+  if (allQueueSnap.empty) {
+    for (const variant of phoneVariants) {
+      const snap = await getDocs(
+        query(collection(serverDb, 'campaign_queue'), where('telefoneE164', '==', variant))
+      );
+      console.log(`[CAMPAIGN REPLY] fallback phone=${variant} → ${snap.size} queue doc(s)`);
+      if (!snap.empty) { allQueueSnap = snap; break; }
+    }
+  }
+
+  if (allQueueSnap.empty) {
+    console.log('[CAMPAIGN REPLY] No queue docs found — not a campaign reply');
+    return false;
+  }
+
+  // Diagnostic: log statuses of all found docs
+  const debugInfo = allQueueSnap.docs.map(d => ({
+    id: d.id,
+    status: d.data().status,
+    processedAt: d.data().processedAt,
+    createdAt: d.data().createdAt,
+    repliedToCampaign: d.data().repliedToCampaign,
+  }));
+  console.log('[CAMPAIGN REPLY] Queue docs:', JSON.stringify(debugInfo));
+
+  const validDocs = allQueueSnap.docs.filter(d => {
+    const data = d.data();
+    // Accept 'enviado' (message confirmed sent) AND 'enviando' (send in-flight — race condition
+    // where contact replies before the Firestore status write completes, ~200ms window)
+    if (data.status !== 'enviado' && data.status !== 'enviando') return false;
+    // Use processedAt if available; fall back to createdAt for 'enviando' docs
+    const timeRef = toMs(data.processedAt) || toMs(data.createdAt);
+    return timeRef >= cutoffTime;
+  });
+
+  console.log(`[CAMPAIGN REPLY] Valid docs (enviado/enviando + within 7d): ${validDocs.length}`);
+
+  if (validDocs.length === 0) {
+    const allStatuses = allQueueSnap.docs.map(d => d.data().status);
+    console.warn('[CAMPAIGN REPLY] No valid docs. All statuses found:', allStatuses);
+    return false;
+  }
+
+  // Sort by most recent: processedAt preferred, fall back to createdAt for in-flight docs
+  validDocs.sort((a, b) => {
+    const tsA = toMs(a.data().processedAt) || toMs(a.data().createdAt);
+    const tsB = toMs(b.data().processedAt) || toMs(b.data().createdAt);
+    return tsB - tsA;
+  });
+
+  // Limitar aos 5 mais recentes
+  const recentDocs = validDocs.slice(0, 5);
 
   // Track reply: increment respondidos once per contact per campaign
-  const unrepliedDoc = queueSnap.docs.find(d => !d.data().repliedToCampaign);
-  let campaignId = unrepliedDoc?.data().campaignId ?? queueSnap.docs[0].data().campaignId;
+  const unrepliedDoc = recentDocs.find(d => !d.data().repliedToCampaign);
+  let campaignId = unrepliedDoc?.data().campaignId ?? recentDocs[0].data().campaignId;
 
   if (unrepliedDoc) {
     await updateDoc(unrepliedDoc.ref, { repliedToCampaign: true });
@@ -754,22 +848,43 @@ async function triggerCampaignImageReply(contactId: string, phoneE164: string, i
       'stats.respondidos': increment(1),
     });
     console.log(`[CAMPAIGN REPLY] respondidos++ for campaign ${campaignId}`);
+
+    // Create log in campaign_logs so it shows up in dashboard and analytics
+    try {
+      const logsColl = collection(serverDb, 'campaign_logs');
+      const newLogRef = doc(logsColl);
+      await setDoc(newLogRef, {
+        id: newLogRef.id,
+        campaignId,
+        contactId,
+        nome: unrepliedDoc.data().nome || 'Contato',
+        telefoneE164: phoneE164,
+        status: 'respondido',
+        message: 'Contato respondeu à campanha',
+        timestamp: Date.now()
+      });
+      console.log(`[CAMPAIGN REPLY] campaign_log created for respondido (${newLogRef.id})`);
+    } catch (logErr) {
+      console.error('[CAMPAIGN REPLY] Error saving respondido log:', logErr);
+    }
   }
 
   const campaignSnap = await getDoc(doc(serverDb, 'campaigns', campaignId));
-  if (!campaignSnap.exists()) return;
+  if (!campaignSnap.exists()) return false;
   const campaign = campaignSnap.data();
 
   const evoUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
   const evoKey = process.env.EVOLUTION_API_KEY;
   if (!evoUrl || !evoKey) {
     console.error('[CAMPAIGN REPLY] Evolution API env vars not set');
-    return;
+    return false;
   }
+
+  let handled = false;
 
   // Feature 1: personalized image from API
   if (campaign.enableImageReply) {
-    const imageReplyDoc = queueSnap.docs.find(d => !d.data().imageReplySent);
+    const imageReplyDoc = recentDocs.find(d => !d.data().imageReplySent);
     if (imageReplyDoc) {
       const apiBase = (campaign.imageReplyApiUrl || 'https://miniaturas.3dfans.pro/api/image-by-phone').replace(/\/$/, '');
       await updateDoc(imageReplyDoc.ref, { imageReplySent: true, imageReplySentAt: Date.now() });
@@ -804,6 +919,7 @@ async function triggerCampaignImageReply(contactId: string, phoneE164: string, i
             console.error(`[CAMPAIGN IMAGE REPLY] Send failed ${sendRes.status}:`, await sendRes.text());
           } else {
             console.log(`[CAMPAIGN IMAGE REPLY] Image sent to ${phoneE164} (campaign: ${campaignId})`);
+            handled = true;
           }
         } catch (sendErr: any) {
           console.error('[CAMPAIGN IMAGE REPLY] Evolution send error:', sendErr.message);
@@ -816,7 +932,7 @@ async function triggerCampaignImageReply(contactId: string, phoneE164: string, i
 
   // Feature 2: configurable auto-reply text (+ optional image)
   if (campaign.enableAutoReply && campaign.autoReplyText?.trim()) {
-    const autoReplyDoc = queueSnap.docs.find(d => !d.data().autoReplySent);
+    const autoReplyDoc = recentDocs.find(d => !d.data().autoReplySent);
     if (autoReplyDoc) {
       await updateDoc(autoReplyDoc.ref, { autoReplySent: true, autoReplySentAt: Date.now() });
 
@@ -835,6 +951,7 @@ async function triggerCampaignImageReply(contactId: string, phoneE164: string, i
             console.error(`[CAMPAIGN AUTO-REPLY] Send failed ${sendRes.status}:`, await sendRes.text());
           } else {
             console.log(`[CAMPAIGN AUTO-REPLY] Image+text sent to ${phoneE164}`);
+            handled = true;
           }
         } else {
           const sendRes = await fetch(`${evoUrl}/message/sendText/${instance}`, {
@@ -846,6 +963,7 @@ async function triggerCampaignImageReply(contactId: string, phoneE164: string, i
             console.error(`[CAMPAIGN AUTO-REPLY] Send failed ${sendRes.status}:`, await sendRes.text());
           } else {
             console.log(`[CAMPAIGN AUTO-REPLY] Text sent to ${phoneE164}`);
+            handled = true;
           }
         }
       } catch (sendErr: any) {
@@ -853,4 +971,6 @@ async function triggerCampaignImageReply(contactId: string, phoneE164: string, i
       }
     }
   }
+
+  return handled;
 }

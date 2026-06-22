@@ -19,18 +19,13 @@ export interface AgentConfig {
   ttsVoice: TTSVoice;
   ttsProvider: TTSProvider;
   elevenLabsVoiceId: string;
+  elevenLabsSpeed: number;
+  elevenLabsStability: number;
+  elevenLabsSimilarityBoost: number;
+  elevenLabsStyle: number;
 }
 
-export async function getAgentConfig(): Promise<AgentConfig> {
-  try {
-    const snap = await adminDb
-      .collection('system')
-      .doc('config')
-      .collection('settings')
-      .doc('aiAgent')
-      .get();
-
-    const defaultPrompt = `Você é Laura, consultora de arte da 3DFans — empresa brasileira especializada em miniaturas 3D personalizadas, impressas e pintadas à mão.
+const DEFAULT_PROMPT = `Você é Laura, consultora de arte da 3DFans — empresa brasileira especializada em miniaturas 3D personalizadas, impressas e pintadas à mão.
 
 ━━━ IDENTIDADE E MISSÃO ━━━
 
@@ -117,6 +112,15 @@ SE ocorrer erro técnico interno:
 - Parágrafos curtos — WhatsApp não é e-mail
 `;
 
+export async function getAgentConfig(): Promise<AgentConfig> {
+  try {
+    const snap = await adminDb
+      .collection('system')
+      .doc('config')
+      .collection('settings')
+      .doc('aiAgent')
+      .get();
+
     if (!snap.exists) {
       return {
         agentName: "Laura",
@@ -127,13 +131,17 @@ SE ocorrer erro técnico interno:
         modoRastreio: false,
         temperature: 0.7,
         personality: "amigável, eficiente e persuasiva",
-        promptBase: defaultPrompt,
+        promptBase: DEFAULT_PROMPT,
         respondWithAudio: false,
         audioStartCondition: "",
         audioStopCondition: "",
         ttsVoice: "nova",
         ttsProvider: "openai",
         elevenLabsVoiceId: "",
+        elevenLabsSpeed: 0.92,
+        elevenLabsStability: 0.65,
+        elevenLabsSimilarityBoost: 0.80,
+        elevenLabsStyle: 0.15,
       };
     }
 
@@ -147,13 +155,17 @@ SE ocorrer erro técnico interno:
       modoRastreio: !!data.modoRastreio,
       temperature: data.temperature || 0.7,
       personality: data.personality || "amigável e eficiente",
-      promptBase: data.promptBase || defaultPrompt,
+      promptBase: data.promptBase || DEFAULT_PROMPT,
       respondWithAudio: !!data.respondWithAudio,
       audioStartCondition: data.audioStartCondition || "",
       audioStopCondition: data.audioStopCondition || "",
       ttsVoice: (data.ttsVoice as TTSVoice) || "nova",
       ttsProvider: (data.ttsProvider as TTSProvider) || "openai",
       elevenLabsVoiceId: data.elevenLabsVoiceId || "",
+      elevenLabsSpeed: data.elevenLabsSpeed ?? 0.92,
+      elevenLabsStability: data.elevenLabsStability ?? 0.65,
+      elevenLabsSimilarityBoost: data.elevenLabsSimilarityBoost ?? 0.80,
+      elevenLabsStyle: data.elevenLabsStyle ?? 0.15,
     };
   } catch (error) {
     console.error("[AGENT CONFIG ERROR]", error);
@@ -166,13 +178,17 @@ SE ocorrer erro técnico interno:
       modoRastreio: false,
       temperature: 0.7,
       personality: "amigável e eficiente",
-      promptBase: "",
+      promptBase: DEFAULT_PROMPT,
       respondWithAudio: false,
       audioStartCondition: "",
       audioStopCondition: "",
       ttsVoice: "nova",
       ttsProvider: "openai",
       elevenLabsVoiceId: "",
+      elevenLabsSpeed: 0.92,
+      elevenLabsStability: 0.65,
+      elevenLabsSimilarityBoost: 0.80,
+      elevenLabsStyle: 0.15,
     };
   }
 }

@@ -271,8 +271,17 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
   }), [preview]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-xl shadow-2xl flex flex-col max-h-[85vh] relative overflow-hidden">
+    <div className="fixed inset-0 z-50 flex md:items-center justify-end md:p-4 bg-black/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ y: '100%', opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: '100%', opacity: 0 }}
+        transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+        className="bg-[#0B1020] border-t md:border border-white/5 rounded-t-[32px] md:rounded-[24px] w-full max-w-xl shadow-[0_-10px_40px_rgba(0,0,0,0.5)] md:shadow-2xl flex flex-col max-h-[90vh] relative overflow-hidden"
+      >
+        <div className="md:hidden flex justify-center p-3 shrink-0">
+           <div className="w-12 h-1.5 bg-white/20 rounded-full" />
+        </div>
 
         {/* Importing Overlay */}
         <AnimatePresence>
@@ -281,7 +290,7 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-20 bg-zinc-950/95 backdrop-blur-sm flex flex-col items-center justify-center p-8 gap-6"
+              className="absolute inset-0 z-20 bg-[#050816]/95 backdrop-blur-sm flex flex-col items-center justify-center p-8 gap-6"
             >
               <div className="relative w-16 h-16">
                 <motion.div
@@ -422,7 +431,7 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
         </div>
 
         {preview.length > 0 && (
-          <div className="px-5 py-4 border-t border-zinc-800 bg-zinc-950 flex justify-end gap-2">
+          <div className="px-5 py-4 border-t border-zinc-800 bg-zinc-950 flex justify-end gap-2 pb-safe">
             <button
               onClick={() => setPreview([])}
               className="px-4 py-2 rounded-lg text-zinc-300 bg-zinc-800 hover:bg-zinc-700 font-medium transition-colors text-sm"
@@ -440,7 +449,7 @@ export const ImportCSVModal: React.FC<ImportCSVModalProps> = ({ onClose, existin
             </button>
           </div>
         )}
-      </div>
+      </motion.div>
     </div>
   );
 };

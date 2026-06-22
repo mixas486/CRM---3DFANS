@@ -69,6 +69,26 @@ export const runSDR = async (chatId: string, _triggerMsgId?: string, mediaType?:
 
         // --- SDR STATE & LOCKING ---
         const isSdrEnabled = resolveSDRState(chat, systemConfig as any);
+        
+        // Reset sdrProcessing se for uma mensagem de texto nova (destrava o bot caso tenha travado)
+        const msgsColl = collection(serverDb, 'messages');
+        const msgsQuery = query(msgsColl, where('chatId', '==', chatId), orderBy('timestamp', 'desc'), limit(30));
+        const msgsSnap = await getDocs(msgsQuery);
+        const msgs = msgsSnap.docs.map(d => d.data()).reverse();
+
+        const effectiveMediaType = mediaType || msgs[msgs.length - 1]?.mediaType || 'text';
+
+        if (effectiveMediaType !== 'image' && chat.sdrProcessing) {
+            const lockTime = chat.sdrProcessingSince?.toMillis ? chat.sdrProcessingSince.toMillis() : 0;
+            const isStale = lockTime > 0 && (Date.now() - lockTime > 120000); // 2 minutos
+
+            if (isStale || lockTime === 0) {
+                logger.info(TAG, '[SDR STATE] Resetting stale sdrProcessing lock for non-image message.');
+                await setDoc(chatRef, { sdrProcessing: false, sdrProcessingSince: null }, { merge: true });
+                chat.sdrProcessing = false; // Atualiza em memoria para continuar o fluxo
+            }
+        }
+
         if (!isSdrEnabled || chat.sdrProcessing) {
             logger.info(TAG, `Chat locked or SDR disabled for ${chatId}`);
             return;
@@ -78,20 +98,6 @@ export const runSDR = async (chatId: string, _triggerMsgId?: string, mediaType?:
         if (contactData?.sdrStatus === 'sdr_disabled') {
             logger.info(TAG, `SDR disabled at contact level for ${chat.contactId} — skipping`);
             return;
-        }
-        
-        const msgsColl = collection(serverDb, 'messages');
-        const msgsQuery = query(msgsColl, where('chatId', '==', chatId), orderBy('timestamp', 'desc'), limit(30));
-        const msgsSnap = await getDocs(msgsQuery);
-        const msgs = msgsSnap.docs.map(d => d.data()).reverse();
-
-        // Use the passed mediaType or fallback to the last message in history
-        const effectiveMediaType = mediaType || msgs[msgs.length - 1]?.mediaType || 'text';
-
-        // Reset sdrProcessing if current message is not an image (to prevent stale states)
-        if (effectiveMediaType !== 'image' && chat.sdrProcessing) {
-            logger.info(TAG, '[SDR STATE] Resetting sdrProcessing for non-image message.');
-            await setDoc(chatRef, { sdrProcessing: false, sdrProcessingSince: null }, { merge: true });
         }
 
         // 1. OBRIGATÓRIO: O SDR não inicia antes do Webhook terminar o upload.
@@ -108,10 +114,19 @@ export const runSDR = async (chatId: string, _triggerMsgId?: string, mediaType?:
         const lastMsg = msgs[msgs.length - 1];
         const triggerText = lastMsg?.text || '';
 
-        const remoteJid = chat.remoteJid;
-        const targetIdentifier = remoteJid.includes('@lid') ? remoteJid : chat.telefoneE164?.replace(/[^\d]/g, '');
+        // Fallback: if chat.remoteJid is missing (old docs), derive from chatId like the old code did
+        const remoteJid: string = chat.remoteJid || chatId.split(':').slice(1).join(':');
+        let targetIdentifier: string;
+        if (remoteJid.includes('@lid')) {
+            targetIdentifier = remoteJid;
+        } else {
+            // Prefer E164 digits; fall back to stripping the JID itself
+            targetIdentifier = chat.telefoneE164?.replace(/[^\d]/g, '')
+                || remoteJid.replace('@s.whatsapp.net', '').replace(/\D/g, '');
+        }
 
-        if (!targetIdentifier) throw new Error('Target identifier missing');
+        logger.info(TAG, `[TARGET] remoteJid=${remoteJid} telefoneE164=${chat.telefoneE164} targetIdentifier=${targetIdentifier}`);
+        if (!targetIdentifier) throw new Error(`Target identifier missing — remoteJid=${remoteJid} telefoneE164=${chat.telefoneE164}`);
 
         let flowInstructions = "";
         let nextStage: LeadStage = currentStage;
@@ -121,10 +136,9 @@ export const runSDR = async (chatId: string, _triggerMsgId?: string, mediaType?:
         if (effectiveMediaType === 'image') {
             logger.info(TAG, '[IMAGE FLOW] Starting multimodal image processing');
 
-            const mediaBuffer = lastMsg?.mediaUrl
-                ? await downloadIncomingMedia(lastMsg.mediaUrl).catch(() => null)
-                : null;
-            const imageSource: string | Buffer = mediaBuffer || chat.originalImageUrl;
+            // downloadIncomingMedia expects the full msgData object, not a URL string.
+            // We use the persisted Firebase Storage URL as the image source for generation.
+            const imageSource: string | Buffer = chat.originalImageUrl;
 
             if (!imageSource) {
                 logger.error(TAG, '[IMAGE FLOW] No image source available');
@@ -147,11 +161,13 @@ export const runSDR = async (chatId: string, _triggerMsgId?: string, mediaType?:
             const customerDescription = captionText || recentCustomerTexts || '';
             logger.info(TAG, `[IMAGE FLOW] Customer description: "${customerDescription || '(none)'}"`);
 
-            // 2. Vision analysis — understand what's in the image
+            // 2. Vision analysis — download full-quality image from Firebase Storage URL for Gemini
             let visionResult = { sdrSummary: '', detailedDescription: 'The subject in the reference photo' };
-            if (mediaBuffer) {
+            if (chat.originalImageUrl) {
                 try {
-                    visionResult = await analyzeImageForSDR(mediaBuffer);
+                    const imgRes = await axios.get(chat.originalImageUrl, { responseType: 'arraybuffer', timeout: 15000 });
+                    const imgBuffer = Buffer.from(imgRes.data);
+                    visionResult = await analyzeImageForSDR(imgBuffer);
                     logger.info(TAG, `[IMAGE FLOW] Vision summary: ${visionResult.sdrSummary}`);
                 } catch (visionErr) {
                     logger.warn(TAG, '[IMAGE FLOW] Vision analysis failed, continuing without it', visionErr);
@@ -509,15 +525,16 @@ REGRAS EXTRAS EXCLUSIVAS DO ÁUDIO (quando usar [USAR_ÁUDIO]):
 - Escreva como FALA, não como escreve — linguagem oral e natural.
 - PROIBIDO: emojis, listas, bullets, asteriscos, hífens, qualquer markdown (são lidos em voz alta).`;
             } else {
-                // Legacy: respond with audio only if current message is audio
-                if (effectiveMediaType === 'audio') {
-                    resolvedAudioMode = true;
+                // Sem condições explícitas: responde com áudio somente quando o contato enviou áudio
+                resolvedAudioMode = effectiveMediaType === 'audio';
+                if (resolvedAudioMode) {
                     audioInstruction = `
 
-MODO ÁUDIO — REGRAS EXTRAS EXCLUSIVAS DO TTS:
-- Escreva como FALA, não como escreve — linguagem oral e natural.
-- PROIBIDO: emojis, listas, bullet points, asteriscos, hífens, markdown (são lidos em voz alta e ficam estranhos).
-- PROIBIDO: mencionar que gosta de conversar por áudio ou que ouve bem.`;
+MODO ÁUDIO ATIVO — o cliente enviou um áudio e você responderá em áudio:
+- Escreva como se estivesse FALANDO, não escrevendo — linguagem oral e natural.
+- PROIBIDO: emojis, listas com hífens, asteriscos, hashtags, markdown de qualquer tipo (tudo isso é lido em voz alta).
+- PROIBIDO: adicionar prefixos como "(Áudio)", "[USAR_ÁUDIO]" ou qualquer tag antes da resposta — comece diretamente com o texto.
+- Frases curtas, ritmo de conversa falada. Direto ao ponto.`;
                 }
             }
         }
@@ -575,49 +592,59 @@ MODO ÁUDIO — REGRAS EXTRAS EXCLUSIVAS DO TTS:
             // Sanitize markdown that WhatsApp renders literally
             // [display text](url) → url  |  **bold** → *bold*  |  strip ``` blocks
             const sanitizedText = rawText
+                .replace(/^\s*\(áudio\)\s*/i, '')                         // strip "(Áudio)" prefix AI sometimes adds
+                .replace(/^\s*\[USAR_(ÁUDIO|AUDIO|TEXTO)\]\s*/i, '')      // strip stray mode tags
                 .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$2')  // markdown links → plain URL
                 .replace(/\*\*([^*]+)\*\*/g, '*$1*')                      // **bold** → *bold* (WhatsApp)
                 .replace(/```[\s\S]*?```/g, '')                           // strip code blocks
                 .trim();
 
             if (agentConfig.respondWithAudio && resolvedAudioMode) {
-                try {
-                    // Strip emojis and all markdown before TTS
-                    const cleanTextForAudio = sanitizedText
-                        .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
-                        .replace(/[*_~`#>]/g, '')
-                        .replace(/\n+/g, ' ')
-                        .trim();
+                const cleanTextForAudio = sanitizedText
+                    .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
+                    .replace(/[*_~`#>]/g, '')
+                    .replace(/\n+/g, ' ')
+                    .trim();
 
-                    if (cleanTextForAudio.length > 5) {
+                if (cleanTextForAudio.length > 5) {
+                    try {
                         const useElevenLabs = agentConfig.ttsProvider === 'elevenlabs' && !!agentConfig.elevenLabsVoiceId;
                         logger.info(TAG, `[TTS] Provider: ${useElevenLabs ? 'elevenlabs' : 'openai'}, voice: ${useElevenLabs ? agentConfig.elevenLabsVoiceId : ttsVoice}`);
                         await sendPresence(targetIdentifier, 'recording');
+                        const audioDelay = randomBetween(2000, 4000);
+                        await sleep(audioDelay);
                         const base64Audio = useElevenLabs
-                            ? await generateElevenLabsAudio(cleanTextForAudio, agentConfig.elevenLabsVoiceId)
+                            ? await generateElevenLabsAudio(cleanTextForAudio, agentConfig.elevenLabsVoiceId, {
+                                speed: agentConfig.elevenLabsSpeed,
+                                stability: agentConfig.elevenLabsStability,
+                                similarity_boost: agentConfig.elevenLabsSimilarityBoost,
+                                style: agentConfig.elevenLabsStyle,
+                              })
                             : await generateAIAudio(cleanTextForAudio, ttsVoice);
                         (useElevenLabs ? trackElevenLabsTTSUsage : trackTTSUsage)(cleanTextForAudio.length)
                             .catch(err => logger.error(TAG, 'TTS usage tracking failed', err));
-                        await sleep(randomBetween(2, 4) * 1000);
                         await sendEvolutionAudio(targetIdentifier, base64Audio);
 
                         // Persist this response text so future turns avoid repeating it
                         const updatedLog = [...sdrAudioLog, { text: cleanTextForAudio, ts: Date.now() }].slice(-8);
                         await adminDb.collection('chats').doc(chatId).update({ sdrAudioLog: updatedLog });
-                    } else {
+                    } catch (ttsErr) {
+                        // TTS failed — send text as fallback
+                        logger.error(TAG, 'TTS failed, falling back to text', ttsErr);
                         await sendPresence(targetIdentifier, 'composing');
-                        await sleep(randomBetween(5, 10) * 1000);
+                        await sleep(randomBetween(2000, 4000));
                         await sendEvolutionText(targetIdentifier, sanitizedText);
                     }
-                } catch (ttsErr) {
-                    logger.error(TAG, 'TTS Generation failed, falling back to text only', ttsErr);
+                } else {
+                    // Text too short for TTS — send as text
                     await sendPresence(targetIdentifier, 'composing');
-                    await sleep(randomBetween(5, 10) * 1000);
+                    await sleep(randomBetween(2000, 4000));
                     await sendEvolutionText(targetIdentifier, sanitizedText);
                 }
             } else {
                 await sendPresence(targetIdentifier, 'composing');
-                await sleep(randomBetween(5, 10) * 1000);
+                const textDelay = randomBetween(5000, 10000);
+                await sleep(textDelay);
                 await sendEvolutionText(targetIdentifier, sanitizedText);
             }
 
@@ -634,7 +661,7 @@ MODO ÁUDIO — REGRAS EXTRAS EXCLUSIVAS DO TTS:
                 direction: 'outbound',
                 text: sanitizedText,
                 body: sanitizedText,
-                mediaType: (agentConfig.respondWithAudio && resolvedAudioMode) ? 'audio' : 'text',
+                mediaType: 'text',
                 timestamp: serverTimestamp(),
                 createdAt: serverTimestamp(),
                 status: 'sent',

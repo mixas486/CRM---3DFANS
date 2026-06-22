@@ -14,7 +14,12 @@ export default defineConfig(() => {
     server: {
   host: "0.0.0.0",
   port: 3000,
-  allowedHosts: ["membrane-fixed-insurance-designated.trycloudflare.com"],
+
+  allowedHosts: [
+    "crm.3dfans.pro",
+    "api.3dfans.pro",
+    "localhost"
+  ],
 
   hmr: process.env.DISABLE_HMR !== 'true',
   watch: process.env.DISABLE_HMR === 'true' ? null : {},

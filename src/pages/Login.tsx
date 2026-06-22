@@ -1,175 +1,90 @@
-import React, { useState } from 'react';
-import { signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
-import { auth } from '../lib/firebase';
-import { useNavigate } from 'react-router-dom';
-import { Loader2, MessageSquare } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { MessageSquare, Lock, AlertCircle } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 
 export const Login: React.FC = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const navigate = useNavigate();
-  const { user } = useAuth();
+    const { loginWithGoogle, user, loading } = useAuth();
+    const navigate = useNavigate();
+    const location = useLocation();
+    const [error, setError] = useState('');
+    const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  React.useEffect(() => {
-    if (user) {
-      if (user.email === 'michelskapp@gmail.com') {
-        navigate('/');
-      } else {
-        setError('Acesso negado. Apenas o administrador (michelskapp@gmail.com) tem acesso a este sistema.');
-        auth.signOut();
-      }
-    }
-  }, [user, navigate]);
+    const from = location.state?.from?.pathname || '/dashboard';
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    
-    if (!email || !password) {
-      setError('Preencha email e senha.');
-      return;
-    }
-    
-    setLoading(true);
-    try {
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch (err: any) {
-      setError('Credenciais inválidas. Verifique seu e-mail e senha.');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    useEffect(() => {
+        if (user) navigate(from, { replace: true });
+    }, [user, navigate, from]);
 
-  const handleGoogleLogin = async () => {
-    setError('');
-    setLoading(true);
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-    } catch (err: any) {
-      setError('Falha ao autenticar com o Google.');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+    const handleGoogleLogin = async () => {
+        try {
+            setError('');
+            setIsLoggingIn(true);
+            await loginWithGoogle();
+            // NÃO navegue aqui — o useEffect que observa `user` cuida disso
+            // após o onAuthStateChanged do Firebase disparar.
+        } catch (err: any) {
+            setError(err.message || 'Erro ao fazer login. Conta não autorizada.');
+            setIsLoggingIn(false);
+        }
+    };
 
-  return (
-    <div className="min-h-screen bg-zinc-950 flex flex-col justify-center py-12 sm:px-6 lg:px-8 font-sans">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="flex justify-center">
-          <div className="w-12 h-12 rounded-xl bg-zinc-100 flex items-center justify-center">
-            <MessageSquare size={24} className="text-zinc-950" />
-          </div>
+    return (
+        <div className="min-h-[100dvh] flex items-center justify-center bg-[#050816] relative overflow-hidden font-sans selection:bg-[#6D5DFC]/30 p-4">
+            <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-[#6D5DFC]/10 blur-[120px] rounded-full pointer-events-none" />
+            <div className="absolute bottom-[-10%] right-[-10%] w-[400px] h-[400px] bg-[#22C55E]/5 blur-[100px] rounded-full pointer-events-none" />
+            <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:64px_64px] [mask-image:radial-gradient(ellipse_at_center,black_20%,transparent_80%)] pointer-events-none opacity-40" />
+
+            <motion.div initial={{ opacity: 0, y: 20, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.5, ease: 'easeOut' }} className="w-full max-w-md">
+                <div className="bg-[#0B1020]/80 backdrop-blur-2xl border border-white/10 rounded-[32px] p-8 md:p-10 shadow-[0_20px_60px_rgba(0,0,0,0.4)] relative overflow-hidden">
+                    <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-[#6D5DFC]/50 to-transparent" />
+                    <div className="flex flex-col items-center justify-center mb-8">
+                        <div className="w-16 h-16 rounded-[20px] bg-gradient-to-br from-[#6D5DFC] to-[#5B4AE0] flex items-center justify-center shadow-[0_0_30px_rgba(109,93,252,0.4)] mb-4 relative group">
+                            <MessageSquare size={32} className="text-white relative z-10" />
+                        </div>
+                        <h1 className="text-2xl font-black text-white tracking-tight">3DFANS CRM</h1>
+                        <p className="text-[#94A3B8] text-sm mt-1 text-center font-medium">Acesso Restrito ao Sistema Operacional</p>
+                    </div>
+
+                    <AnimatePresence>
+                        {error && (
+                            <motion.div initial={{ opacity: 0, height: 0, y: -10 }} animate={{ opacity: 1, height: 'auto', y: 0 }} exit={{ opacity: 0, height: 0, y: -10 }}
+                                className="mb-6 bg-[#EF4444]/10 border border-[#EF4444]/20 text-[#EF4444] text-sm px-4 py-3 rounded-2xl flex items-start gap-3">
+                                <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                                <span className="leading-relaxed font-medium">{error}</span>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    <div className="space-y-6">
+                        <div className="flex items-center gap-4">
+                            <div className="h-px bg-white/10 flex-1" />
+                            <span className="text-xs font-bold text-[#94A3B8] uppercase tracking-widest">Autenticação</span>
+                            <div className="h-px bg-white/10 flex-1" />
+                        </div>
+                        <button onClick={handleGoogleLogin} disabled={loading || isLoggingIn}
+                            className="w-full relative group overflow-hidden rounded-[20px] bg-white hover:bg-zinc-100 transition-all active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none">
+                            <div className="relative px-6 py-4 flex items-center justify-center gap-3">
+                                {isLoggingIn ? (
+                                    <>
+                                        <div className="w-5 h-5 border-2 border-zinc-300 border-t-[#6D5DFC] rounded-full animate-spin" />
+                                        <span className="text-zinc-900 font-bold text-[15px]">Autenticando...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <svg viewBox="0 0 24 24" width="22" height="22"><g transform="matrix(1, 0, 0, 1, 27.009001, -39.238998)"><path fill="#4285F4" d="M -3.264 51.509 C -3.264 50.719 -3.334 49.969 -3.454 49.239 L -14.754 49.239 L -14.754 53.749 L -8.284 53.749 C -8.574 55.229 -9.424 56.479 -10.684 57.329 L -10.684 60.329 L -6.824 60.329 C -4.564 58.239 -3.264 55.159 -3.264 51.509 Z"/><path fill="#34A853" d="M -14.754 63.239 C -11.514 63.239 -8.804 62.159 -6.824 60.329 L -10.684 57.329 C -11.764 58.049 -13.134 58.489 -14.754 58.489 C -17.884 58.489 -20.534 56.379 -21.484 53.529 L -25.464 53.529 L -25.464 56.619 C -23.494 60.539 -19.444 63.239 -14.754 63.239 Z"/><path fill="#FBBC05" d="M -21.484 53.529 C -21.734 52.809 -21.864 52.039 -21.864 51.239 C -21.864 50.439 -21.724 49.669 -21.484 48.949 L -21.484 45.859 L -25.464 45.859 C -26.284 47.479 -26.754 49.299 -26.754 51.239 C -26.754 53.179 -26.284 54.999 -25.464 56.619 L -21.484 53.529 Z"/><path fill="#EA4335" d="M -14.754 43.989 C -12.984 43.989 -11.404 44.599 -10.154 45.789 L -6.734 41.939 C -8.804 40.009 -11.514 38.899 -14.754 38.899 C -19.444 38.899 -23.494 41.599 -25.464 45.859 L -21.484 48.949 C -20.534 46.099 -17.884 43.989 -14.754 43.989 Z"/></g></svg>
+                                        <span className="text-zinc-900 font-bold text-[15px]">Continuar com Google</span>
+                                    </>
+                                )}
+                            </div>
+                        </button>
+                    </div>
+                    <div className="mt-8 pt-6 border-t border-white/5 flex items-center justify-center gap-2 text-[#94A3B8] text-xs font-medium">
+                        <Lock size={12} className="text-[#6D5DFC]" /> Ambiente Seguro & Monitorado
+                    </div>
+                </div>
+            </motion.div>
         </div>
-        <h2 className="mt-6 text-center text-3xl font-extrabold text-white tracking-tight">
-          3DFANS CRM
-        </h2>
-        <p className="mt-2 text-center text-sm text-zinc-400">
-          Acesso restrito
-        </p>
-      </div>
-
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="bg-zinc-900 py-8 px-4 shadow-xl border border-zinc-800 sm:rounded-2xl sm:px-10">
-          <form className="space-y-6" onSubmit={handleSubmit}>
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg p-3 text-sm">
-                {error}
-              </div>
-            )}
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-zinc-300">
-                Endereço de E-mail
-              </label>
-              <div className="mt-2">
-                <input
-                  id="email"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="appearance-none block w-full px-3 py-2 border border-zinc-700 rounded-lg shadow-sm placeholder-zinc-500 bg-zinc-800 text-white focus:outline-none focus:ring-2 focus:ring-zinc-600 focus:border-transparent sm:text-sm"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-zinc-300">
-                Senha
-              </label>
-              <div className="mt-2">
-                <input
-                  id="password"
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="appearance-none block w-full px-3 py-2 border border-zinc-700 rounded-lg shadow-sm placeholder-zinc-500 bg-zinc-800 text-white focus:outline-none focus:ring-2 focus:ring-zinc-600 focus:border-transparent sm:text-sm"
-                />
-              </div>
-            </div>
-
-            <div>
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full flex justify-center items-center gap-2 py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-zinc-950 bg-zinc-100 hover:bg-zinc-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-zinc-500 focus:ring-offset-zinc-900 transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
-              >
-                {loading ? <Loader2 size={18} className="animate-spin" /> : null}
-                Entrar com Email
-              </button>
-            </div>
-            
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-zinc-700" />
-              </div>
-              <div className="relative flex justify-center text-sm">
-                <span className="px-2 bg-zinc-900 text-zinc-400">Ou continuar com</span>
-              </div>
-            </div>
-
-            <div>
-              <button
-                type="button"
-                onClick={handleGoogleLogin}
-                disabled={loading}
-                className="w-full flex justify-center items-center gap-2 py-2.5 px-4 border border-zinc-700 rounded-lg shadow-sm text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-zinc-500 focus:ring-offset-zinc-900 transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                  <path
-                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                    fill="#4285F4"
-                  />
-                  <path
-                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                    fill="#34A853"
-                  />
-                  <path
-                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
-                    fill="#FBBC05"
-                  />
-                  <path
-                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-                    fill="#EA4335"
-                  />
-                </svg>
-                {loading ? <Loader2 size={18} className="animate-spin" /> : null}
-                Entrar com Google
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
-  );
+    );
 };

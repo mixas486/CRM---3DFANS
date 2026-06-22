@@ -1,10 +1,13 @@
-import { collection, doc, setDoc, updateDoc, getDoc, query, where, getDocs, onSnapshot, increment, limit, getCountFromServer } from 'firebase/firestore';
+import { collection, doc, setDoc, updateDoc, getDoc, query, where, getDocs, onSnapshot, increment, limit, getCountFromServer, serverTimestamp } from 'firebase/firestore';
 import { serverDb } from './firebase';
 
 const activeCampaigns = new Map<string, boolean>();
 
 let cachedSystemSettings: any = null;
 let lastSettingsFetchTime = 0;
+
+// Variável global em memória para travar envios mais rápidos que 30s
+let lastGlobalSendTime = 0;
 
 async function getCachedSystemSettings() {
   const now = Date.now();
@@ -237,7 +240,7 @@ async function processCampaign(campaignId: string) {
     // Fetch contact and associated chat (for SDR state)
     const instanceId = campaign.instanceId || process.env.EVOLUTION_INSTANCE || '3dfans';
     const parsedPhone = queueItem.telefoneE164.replace(/[^\d]/g, '');
-    const chatIdVal = `${instanceId}:${parsedPhone}`;
+    const chatIdVal = `${instanceId}:${parsedPhone}@s.whatsapp.net`;
     const chatRef = doc(serverDb, 'chats', chatIdVal);
 
     const [contactSnap, chatSnap] = await Promise.all([
@@ -248,12 +251,12 @@ async function processCampaign(campaignId: string) {
     if (!contactSnap.exists()) {
       console.warn(`[Campaign Worker] Processing failed: Contact ID ${queueItem.contactId} does not exist in Firestore.`);
       await updateDoc(queueDocRef, { status: 'falhou', error: 'Contato inexistente no CRM', processedAt: Date.now() });
-      await updateDoc(campaignRef, { 
+      await updateDoc(campaignRef, {
         'stats.falhas': increment(1),
         'stats.aguardando': increment(-1)
       });
       await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', 'Contato excluído do banco de dados.');
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500)); // no message sent — skip fast
       continue;
     }
 
@@ -264,20 +267,18 @@ async function processCampaign(campaignId: string) {
     const eligibility = canSendCampaign(contact, chat);
     if (!eligibility.allowed) {
       console.warn(`[Campaign Worker] Skipping contact ${queueItem.nome}: ${eligibility.reason}`);
-      await updateDoc(queueDocRef, { 
-        status: 'falhou', 
-        error: `IGNORADO (Cooldown): ${eligibility.reason}`, 
-        processedAt: Date.now() 
+      await updateDoc(queueDocRef, {
+        status: 'falhou',
+        error: `IGNORADO (Cooldown): ${eligibility.reason}`,
+        processedAt: Date.now()
       });
-      await updateDoc(campaignRef, { 
+      await updateDoc(campaignRef, {
         'stats.falhas': increment(1),
         'stats.aguardando': increment(-1),
         'stats.ignorados': increment(1)
       });
       await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', `Pular: ${eligibility.reason}`);
-      
-      // Small pause to avoid tight loop on ignored contacts
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 500)); // no message sent — skip fast
       continue;
     }
     // --- End Check ---
@@ -285,24 +286,24 @@ async function processCampaign(campaignId: string) {
     if (!contact.optIn) {
       console.warn(`[Campaign Worker] Processing skipped: Contact "${queueItem.nome}" has optIn set to false.`);
       await updateDoc(queueDocRef, { status: 'falhou', error: 'Contato sem Opt-In ativo', processedAt: Date.now() });
-      await updateDoc(campaignRef, { 
+      await updateDoc(campaignRef, {
         'stats.falhas': increment(1),
         'stats.aguardando': increment(-1)
       });
       await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', 'Bloqueado: Contato desabilitou recebimento (opt-in falso).');
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500)); // no message sent — skip fast
       continue;
     }
 
     if (contact.status !== 'active') {
       console.warn(`[Campaign Worker] Processing skipped: Contact "${queueItem.nome}" is archived or inactive in CRM.`);
       await updateDoc(queueDocRef, { status: 'falhou', error: 'Contato inativo no CRM', processedAt: Date.now() });
-      await updateDoc(campaignRef, { 
+      await updateDoc(campaignRef, {
         'stats.falhas': increment(1),
         'stats.aguardando': increment(-1)
       });
       await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', 'Bloqueado: Contato arquivado ou inativo.');
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500)); // no message sent — skip fast
       continue;
     }
 
@@ -318,9 +319,46 @@ async function processCampaign(campaignId: string) {
         .replace(/{{interesse}}/g, contact.interesse || '');
     }
 
-    // 7. Send message via Evolution API
-    try {
-      const url = process.env.EVOLUTION_API_URL;
+      // 7. Send message via Evolution API
+      
+      // CHECAGEM DE SEGURANÇA GLOBAL (Nunca menos de 30 segundos)
+      const now = Date.now();
+      const timeSinceLastSend = now - lastGlobalSendTime;
+      if (lastGlobalSendTime > 0 && timeSinceLastSend < 30000) {
+        console.error(`[CRITICAL BAN RISK] Tentativa de envio muito rápida detectada (${timeSinceLastSend}ms desde o último disparo). Pausando campanha por segurança.`);
+        
+        await updateDoc(queueDocRef, { status: 'aguardando' }); // Devolve para a fila
+        await updateDoc(campaignRef, { 
+          status: 'paused', 
+          pausedByAntiban: true,
+          pausedAt: Date.now(),
+          antibanDecay: (campaign.antibanDecay || 0) + 15 // Aumenta a punição/risk score
+        });
+        
+        await createCampaignLog(
+          campaignId, 
+          'system', 
+          'Sistema de Proteção', 
+          'CRM', 
+          'paused', 
+          `SISTEMA PAUSADO AUTOMATICAMENTE: Foi detectado um envio simultâneo ou mais rápido do que 30 segundos (${(timeSinceLastSend/1000).toFixed(1)}s). A operação foi congelada para evitar o banimento do número.`
+        );
+        
+        // Dispara um sinal para o frontend exibir o modal
+        await setDoc(doc(serverDb, 'system', 'settings'), {
+           lastEmergencyPause: Date.now(),
+           emergencyPauseReason: `Envio duplo evitado. Último disparo foi há ${(timeSinceLastSend/1000).toFixed(1)}s.`
+        }, { merge: true });
+        
+        activeCampaigns.delete(campaignId);
+        break; // Quebra o worker thread
+      }
+
+      // Trava imediatamente a variável na memória ANTES do fetch para impedir concorrência de threads
+      lastGlobalSendTime = now;
+
+      try {
+        const url = process.env.EVOLUTION_API_URL;
       const key = process.env.EVOLUTION_API_KEY;
       const instance = process.env.EVOLUTION_INSTANCE;
       
@@ -341,7 +379,8 @@ async function processCampaign(campaignId: string) {
           'stats.aguardando': increment(-1)
         });
         await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, rawNumber, 'falhou', `Bloqueado: identificador @lid não é um telefone válido (${rawNumber}). Resincronize o contato.`);
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        const currentDelayMin = (await getCachedSystemSettings()).delayMinMs || 35000;
+        await new Promise((resolve) => setTimeout(resolve, currentDelayMin));
         continue;
       }
 
@@ -351,18 +390,20 @@ async function processCampaign(campaignId: string) {
 
       if (!number.startsWith('55') || number.length < 12) {
         console.error('[SEND BLOCKED] Campaign worker found invalid phone number:', number);
-        await updateDoc(campaignRef, { 
+        await updateDoc(campaignRef, {
           'stats.falhas': increment(1),
           'stats.aguardando': increment(-1)
         });
         await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, number, 'falhou', `Bloqueado: Telefone inválido (${number}). Requer código de país 55 e mínimo de 12 dígitos.`);
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        const currentDelayMin = (await getCachedSystemSettings()).delayMinMs || 35000;
+        await new Promise((resolve) => setTimeout(resolve, currentDelayMin));
         continue;
       }
 
       // 7a. Fetch personalized image if sendImageWithMessage is enabled
       let imageBase64: string | null = null;
       let imageMimeType = 'image/jpeg';
+      let campaignImageUrl = ''; // source URL of the image (used as mediaUrl in the message)
 
       if (campaign.sendImageWithMessage) {
         const apiBase = (campaign.imageReplyApiUrl || 'https://miniaturas.3dfans.pro/api/image-by-phone').replace(/\/$/, '');
@@ -384,6 +425,7 @@ async function processCampaign(campaignId: string) {
                 const buf = await imgFetch.arrayBuffer();
                 imageBase64 = Buffer.from(buf).toString('base64');
                 imageMimeType = imgFetch.headers.get('content-type') || 'image/jpeg';
+                campaignImageUrl = imgUrl; // save for message document
                 console.log(`[Campaign Worker] Image downloaded (${imageBase64.length} bytes base64, ${imageMimeType})`);
               }
             }
@@ -475,18 +517,39 @@ async function processCampaign(campaignId: string) {
       // Save Message to system wide messages to let it show up in CRM dashboards
       const msgRef = doc(collection(serverDb, 'messages'), remoteMessageId);
       await setDoc(msgRef, {
+        id: remoteMessageId,
         chatId: chatIdVal,
         remoteJid: remoteJid,
         phoneE164: parsedPhone,
         instanceId: instanceId,
+        instance: instanceId,
         contactId: queueItem.contactId,
+        fromMe: true,
         direction: 'outbound',
         text: messageText,
-        mediaType: 'text',
-        timestamp: Date.now(),
+        body: messageText,
+        mediaType: imageBase64 ? 'image' : 'text',
+        mediaUrl: campaignImageUrl,
+        timestamp: serverTimestamp(),
+        createdAt: serverTimestamp(),
         status: 'sent',
         campaignId: campaignId
       });
+
+      // Update the chat document so the webhook knows there's an outbound message
+      await setDoc(chatRef, {
+        id: chatIdVal,
+        contactId: queueItem.contactId,
+        remoteJid: remoteJid,
+        telefoneE164: `+${parsedPhone}`,
+        pushName: queueItem.nome || 'Contato',
+        lastMessage: messageText,
+        lastMessageAt: serverTimestamp(),
+        lastMessageDirection: 'outbound',
+        instanceId: instanceId,
+        updatedAt: serverTimestamp(),
+        hasOutbound: true
+      }, { merge: true });
 
       // Optionally update CRM contact's lastContactAt timestamp
       await updateDoc(doc(serverDb, 'contacts', queueItem.contactId), {
@@ -497,66 +560,70 @@ async function processCampaign(campaignId: string) {
 
     } catch (apiError: any) {
       console.error(`[Campaign Worker] API Failure sending to ${queueItem.nome}: ${apiError.message}`);
-      
       const errorStr = apiError.message || String(apiError);
 
-      await updateDoc(queueDocRef, {
-        status: 'falhou',
-        error: errorStr,
-        processedAt: Date.now()
-      });
+      // Inner try/catch: Firestore writes inside the catch must NOT propagate —
+      // if they throw, the delay at step 8 would be skipped and the next contact
+      // would be processed immediately, causing a burst of rapid sends.
+      try {
+        await updateDoc(queueDocRef, {
+          status: 'falhou',
+          error: errorStr,
+          processedAt: Date.now()
+        });
+        await updateDoc(campaignRef, {
+          'stats.falhas': increment(1),
+          'stats.aguardando': increment(-1)
+        });
+        await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', `Falha Evolution API: ${errorStr}`);
 
-      await updateDoc(campaignRef, {
-        'stats.falhas': increment(1),
-        'stats.aguardando': increment(-1)
-      });
-
-      await createCampaignLog(campaignId, queueItem.contactId, queueItem.nome, queueItem.telefoneE164, 'falhou', `Falha Evolution API: ${errorStr}`);
-
-      if (apiError.isInvalidNumber) {
-         try {
-            await updateDoc(doc(serverDb, 'contacts', queueItem.contactId), {
-                optIn: false,
-                status: 'invalid',
-                notes: 'Desativado: Número não possui WhatsApp ativo (Detectado pela API da Evolution).',
-                needsReview: true
-            });
-         } catch (e) {
-            console.error('[Campaign Worker] Falha ao desativar contato inválido', e);
-         }
+        if (apiError.isInvalidNumber) {
+          await updateDoc(doc(serverDb, 'contacts', queueItem.contactId), {
+            optIn: false,
+            status: 'invalid',
+            notes: 'Desativado: Número não possui WhatsApp ativo (Detectado pela API da Evolution).',
+            needsReview: true
+          });
+        }
+      } catch (innerErr: any) {
+        console.error('[Campaign Worker] Firestore write failed inside error handler (non-fatal):', innerErr?.message || innerErr);
       }
     }
 
-    // 8. Execute anti-ban delay (warmup helper & delay)
-    const settingsPost = await getCachedSystemSettings();
-    const dMin = settingsPost.delayMinMs || 35000;
-    const dMax = settingsPost.delayMaxMs || 90000;
-    const batchSize = settingsPost.batchSize || 20;
-    const batchPause = settingsPost.batchPauseMs || 60000;
+    // 8. Anti-ban delay — runs after EVERY contact (success or failure).
+    // Wrapped in try/catch with fallback so a settings-fetch error never skips the wait.
+    try {
+      const settingsPost = await getCachedSystemSettings();
+      const dMin = settingsPost.delayMinMs || 35000;
+      const dMax = settingsPost.delayMaxMs || 90000;
+      const batchSize = settingsPost.batchSize || 20;
+      const batchPause = settingsPost.batchPauseMs || 60000;
 
-    batchCounter++;
+      batchCounter++;
 
-    if (batchSize > 0 && batchCounter >= batchSize) {
-      console.log(`[Campaign Worker] Batch limit of ${batchSize} reached. Applying batch pause of ${batchPause}ms...`);
-      await createCampaignLog(campaignId, 'system', 'Worker', 'Segurança', 'enviado', `Pausa de segurança: ${batchPause/1000}s após lote de ${batchSize} disparos.`);
-      
-      // Notify frontend about the pause
-      await updateDoc(campaignRef, {
-        batchPauseUntil: Date.now() + batchPause,
-        batchPauseDuration: batchPause
-      });
+      if (batchSize > 0 && batchCounter >= batchSize) {
+        console.log(`[Campaign Worker] Batch limit of ${batchSize} reached. Applying batch pause of ${batchPause}ms...`);
+        try {
+          await createCampaignLog(campaignId, 'system', 'Worker', 'Segurança', 'enviado', `Pausa de segurança: ${batchPause / 1000}s após lote de ${batchSize} disparos.`);
+          await updateDoc(campaignRef, { batchPauseUntil: Date.now() + batchPause, batchPauseDuration: batchPause });
+        } catch { /* non-fatal */ }
 
-      batchCounter = 0; // Reset
-      await new Promise((resolve) => setTimeout(resolve, batchPause));
+        batchCounter = 0;
+        await new Promise((resolve) => setTimeout(resolve, batchPause));
 
-      // Clear pause status
-      await updateDoc(campaignRef, {
-        batchPauseUntil: null
-      });
-    } else {
-      const randomDelay = Math.floor(Math.random() * (dMax - dMin + 1)) + dMin;
-      console.log(`[Campaign Worker] Applying anti-ban interval delay of ${randomDelay}ms before next message...`);
-      await new Promise((resolve) => setTimeout(resolve, randomDelay));
+        try {
+          await updateDoc(campaignRef, { batchPauseUntil: null });
+        } catch { /* non-fatal */ }
+      } else {
+        const randomDelay = Math.floor(Math.random() * (dMax - dMin + 1)) + dMin;
+        console.log(`[Campaign Worker] Anti-ban delay: ${randomDelay}ms`);
+        await new Promise((resolve) => setTimeout(resolve, randomDelay));
+      }
+    } catch (delayErr: any) {
+      // Settings fetch failed — fall back to minimum safe delay to avoid burst
+      const fallbackDelay = delayMin;
+      console.error(`[Campaign Worker] Delay step failed, applying fallback ${fallbackDelay}ms:`, delayErr?.message || delayErr);
+      await new Promise((resolve) => setTimeout(resolve, fallbackDelay));
     }
   }
 }

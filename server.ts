@@ -1501,6 +1501,72 @@ Sua tarefa: Reescreva a Mensagem Matriz gerando UMA NOVA variação, mantendo es
     }
   });
 
+  // ── Generate N template variations in a single GPT call (for campaign dispatch)
+  app.post("/api/generate-campaign-variations", async (req, res): Promise<any> => {
+    try {
+      const openai = initOpenAI();
+      if (!openai) {
+        return res.status(500).json({ error: "OPENROUTER_API_KEY is required." });
+      }
+
+      const { template, count = 5 } = req.body as { template: string; count?: number };
+      if (!template?.trim()) {
+        return res.status(400).json({ error: "template is required." });
+      }
+
+      const n = Math.min(Math.max(Number(count) || 5, 2), 20);
+
+      const prompt = `Você é um especialista em marketing de WhatsApp brasileiro.
+
+Mensagem original:
+"""
+${template}
+"""
+
+Gere EXATAMENTE ${n} variações diferentes desta mensagem para uma campanha de WhatsApp.
+Cada variação deve:
+- Manter a mesma intenção/oferta (não invente fatos ou preços)
+- Ter tom amigável e direto em português BR
+- Ser ligeiramente diferente nas palavras iniciais, finais ou na estrutura
+- Ter tamanho similar à original
+- Manter EXATAMENTE os placeholders {{nome}} e {{produto}} onde existirem (não substitua)
+- Não usar markdown, apenas texto puro
+- Ser natural como uma mensagem humana enviada pelo WhatsApp
+
+Retorne SOMENTE um JSON válido neste formato:
+{
+  "variations": [
+    "variação 1 aqui",
+    "variação 2 aqui"
+  ]
+}`;
+
+      const completion = await openai.chat.completions.create({
+        messages: [{ role: "user", content: prompt }],
+        model: process.env.OPENAI_MODEL || "openai/gpt-4o-mini",
+        temperature: 0.8,
+        response_format: { type: "json_object" },
+      });
+
+      const raw = completion.choices[0]?.message?.content;
+      if (!raw) throw new Error("Empty GPT response");
+
+      const parsed = JSON.parse(raw);
+      const variations: string[] = Array.isArray(parsed.variations) ? parsed.variations : [];
+
+      if (variations.length === 0) {
+        throw new Error("GPT returned no variations");
+      }
+
+      console.log(`[CAMPAIGN VARIATIONS] Generated ${variations.length} variations`);
+      return res.json({ variations });
+
+    } catch (e: any) {
+      console.error("/api/generate-campaign-variations error:", e);
+      return res.status(500).json({ error: e.message || "Error generating variations" });
+    }
+  });
+
   app.post("/api/generate", async (req, res): Promise<any> => {
     try {
       // Rate limiting check
@@ -1631,7 +1697,7 @@ Retorne APENAS um JSON válido no seguinte formato:
 
       const prompt = `CONVERSA:\n${conversationText}\n\nRetorne apenas o JSON.`;
 
-      const aiResult = await generateAIResponse(prompt, systemPrompt, 'gemini-2.5-flash');
+      const aiResult = await generateAIResponse(prompt, systemPrompt, 0.7);
       
       let parsed = { status: "nao_analisado", temperature: 0, summary: "Erro na análise" };
       try {

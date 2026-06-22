@@ -23,6 +23,7 @@ import SystemLogs from './pages/admin/SystemLogs';
 import Orcamentos from './pages/Orcamentos';
 import Analytics from './pages/Analytics';
 import AIPreview from './pages/AIPreview';
+import { Permissions } from './pages/Permissions';
 
 export default function App() {
   return (
@@ -48,6 +49,7 @@ export default function App() {
               <Route path="/orcamentos" element={<Orcamentos />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/ai-preview" element={<AIPreview />} />
+              <Route path="/permissions" element={<ProtectedRoute requireAdmin><Permissions /></ProtectedRoute>} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

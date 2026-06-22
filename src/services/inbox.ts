@@ -1,6 +1,6 @@
-import { collection, query, orderBy, onSnapshot, where, limit, doc, updateDoc, getDocs, setDoc } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, where, limit, doc, updateDoc, getDocs, setDoc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { getContactsByPhone } from './firestore'; 
+import { getContactsByPhone } from './firestore';
 import { Contact } from '../types';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
 import { extractWhatsAppPhone } from '../utils/whatsapp';
@@ -208,13 +208,51 @@ export const subscribeToInboxChats = (
 
         // Sort in memory by lastMessageTime descending
         chats.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
-        
+
         if (chats.length > maxLimit) {
             chats = chats.slice(0, maxLimit);
         }
-        
+
         console.log(`[Inbox Hydration] Loaded ${chats.length} chats in realtime successfully.`);
         callback(chats);
+
+        // Enrich chats missing profilePicUrl by fetching from their contact document
+        const missingPic = chats.filter(c => !c.profilePicUrl);
+        if (missingPic.length === 0) return;
+
+        // Build lookup: contactId → [chatIndex, ...] (prefer contactId; fall back to phone lookup)
+        const needsContactFetch: Array<{ chat: InboxChat; contactId?: string }> = missingPic.map(chat => {
+            const rawData = snapshot.docs.find(d => d.id === chat.chatId)?.data() || {};
+            return { chat, contactId: rawData.contactId || undefined };
+        });
+
+        Promise.all(
+            needsContactFetch.map(async ({ chat, contactId }) => {
+                if (contactId) {
+                    try {
+                        const snap = await getDoc(doc(db, 'contacts', contactId));
+                        const picUrl: string = snap.data()?.profilePicUrl || snap.data()?.avatar || '';
+                        if (picUrl) return { chatId: chat.chatId, profilePicUrl: picUrl };
+                    } catch { /* silent */ }
+                }
+                if (chat.telefoneE164) {
+                    try {
+                        const matches = await getContactsByPhone(chat.telefoneE164);
+                        const picUrl: string = matches[0]?.profilePicUrl || '';
+                        if (picUrl) return { chatId: chat.chatId, profilePicUrl: picUrl };
+                    } catch { /* silent */ }
+                }
+                return null;
+            })
+        ).then(results => {
+            const updates = results.filter(Boolean) as Array<{ chatId: string; profilePicUrl: string }>;
+            if (updates.length === 0) return;
+            const enriched = chats.map(c => {
+                const upd = updates.find(u => u.chatId === c.chatId);
+                return upd ? { ...c, profilePicUrl: upd.profilePicUrl, avatar: upd.profilePicUrl } : c;
+            });
+            callback(enriched);
+        }).catch(() => {});
     }, (err) => {
         console.error('[Inbox Hydration] Error listening to "chats" collection:', err);
         try {
@@ -241,21 +279,47 @@ export const subscribeToInboxMessages = (
     
     return onSnapshot(q, (snapshot) => {
         console.log(`[Firestore Query Audit] Received messages update for chat ${chatId}. Doc count: ${snapshot.size}`);
-        let msgs = snapshot.docs.map(doc => {
-            const data = doc.data({ serverTimestamps: 'estimate' }) || {};
+        let msgs = snapshot.docs.map(docSnap => {
+            const data = docSnap.data({ serverTimestamps: 'estimate' }) || {};
             const getMillis = (val: any) => val?.toMillis ? val.toMillis() : (typeof val === 'number' ? val : 0);
+
+            // Evolution API stores type in messageType or type field
+            const messageType: string = data.messageType || data.type || 'textMessage';
+
+            // Nested message payload (Evolution v2 format: data.message.imageMessage, etc.)
+            const nested: any = (data.message && data.message[messageType]) ? data.message[messageType] : {};
+
+            // Body: text > body > nested caption > nested text
+            const body: string = data.text ?? data.body ?? nested.caption ?? nested.text ?? '';
+
+            // Media URL: top-level field wins, then nested URL
+            const mediaUrl: string = data.mediaUrl || data.media || nested.url || '';
+
+            // Derive mediaType from messageType when not explicit
+            let mediaType: string = data.mediaType || '';
+            if (!mediaType) {
+                if (/audio|ptt/i.test(messageType))    mediaType = 'audio';
+                else if (/image/i.test(messageType))   mediaType = 'image';
+                else if (/video/i.test(messageType))   mediaType = 'video';
+                else if (/sticker/i.test(messageType)) mediaType = 'sticker';
+                else if (/document/i.test(messageType))mediaType = 'document';
+                else                                    mediaType = 'text';
+            }
+
             return {
-                id: doc.id,
+                id: docSnap.id,
                 direction: (data.fromMe || data.direction === 'outbound') ? 'outbound' : 'inbound',
-                body: data.text || data.body || '',
+                body,
                 timestamp: getMillis(data.timestamp) || getMillis(data.createdAt) || 0,
                 status: data.status || 'received',
-                mediaType: data.mediaType || 'text',
-                mediaUrl: data.mediaUrl || ''
+                mediaType,
+                messageType,
+                mediaUrl,
+                instanceId: data.instanceId || data.instance || data.instanceName || '',
             };
         });
-        
-        // Sort in memory by timestamp ascending to order chronologically (oldest first, newest last)
+
+        // Sort chronologically: oldest first → newest at bottom of chat
         msgs.sort((a, b) => a.timestamp - b.timestamp);
         
         callback(msgs);

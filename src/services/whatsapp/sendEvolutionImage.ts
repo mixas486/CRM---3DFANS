@@ -48,7 +48,13 @@ export async function sendEvolutionText(number: string, text: string): Promise<a
   const key = process.env.EVOLUTION_API_KEY;
   const instance = process.env.EVOLUTION_INSTANCE;
 
+  if (!url || !key || !instance) {
+    throw new Error(`Evolution credentials missing for sendText — url=${!!url} key=${!!key} instance=${!!instance}`);
+  }
+
   const cleanNumber = number.includes('@lid') ? number : number.replace(/[^\d]/g, '');
+
+  logger.info(TAG, `Sending text to ${cleanNumber} (${text.length} chars)`);
 
   try {
     const response = await fetch(`${url}/message/sendText/${instance}`, {
@@ -65,7 +71,13 @@ export async function sendEvolutionText(number: string, text: string): Promise<a
       })
     });
 
-    return await response.json();
+    const data = await response.json();
+    if (!response.ok) {
+      logger.error(TAG, `sendText failed HTTP ${response.status}`, data);
+      throw new Error(`Evolution sendText HTTP ${response.status}: ${JSON.stringify(data)}`);
+    }
+    logger.info(TAG, 'WhatsApp text sent');
+    return data;
   } catch (err) {
     logger.error(TAG, 'Failed to send text', err);
     throw err;

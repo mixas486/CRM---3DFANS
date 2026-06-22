@@ -18,6 +18,7 @@ process.on('uncaughtException', (error) => {
 
 let ai: GoogleGenAI | null = null;
 let openai: OpenAI | null = null;
+let openaiDirect: OpenAI | null = null;
 
 function getAiClient() {
     console.log('[DEBUG] getAiClient called');
@@ -25,7 +26,7 @@ function getAiClient() {
         const apiKey = process.env.GEMINI_API_KEY;
         console.log('[DEBUG] GEMINI_API_KEY present:', !!apiKey);
         if (!apiKey) throw new Error('GEMINI_API_KEY env var not set');
-        ai = new GoogleGenAI({ 
+        ai = new GoogleGenAI({
             apiKey
         });
         console.log('[DEBUG] ai client instantiated');
@@ -45,13 +46,21 @@ function getOpenAiClient() {
     return openai;
 }
 
-const timeoutPromise = (ms: number): Promise<never> => new Promise((_, reject) => {
-    console.log('[TIMEOUT STARTED]', ms);
-    setTimeout(() => {
-        console.log('[TIMEOUT TRIGGERED]');
-        reject(new Error('AI Provider Timeout'));
-    }, ms);
-});
+// Separate client for direct OpenAI API (Whisper STT, TTS) — OpenRouter does not support these endpoints
+function getOpenAiDirectClient(): OpenAI | null {
+    if (!openaiDirect && process.env.OPENAI_API_KEY) {
+        openaiDirect = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    }
+    return openaiDirect;
+}
+
+function makeTimeout(ms: number): { promise: Promise<never>; cancel: () => void } {
+    let timerId: ReturnType<typeof setTimeout>;
+    const promise = new Promise<never>((_, reject) => {
+        timerId = setTimeout(() => reject(new Error('AI Provider Timeout')), ms);
+    });
+    return { promise, cancel: () => clearTimeout(timerId!) };
+}
 
 async function generateGeminiResponse(prompt: string, systemInstruction?: string, temperature: number = 0.7, imageSource?: string | Buffer): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
     console.log('[DEBUG] generateGeminiResponse start');
@@ -85,6 +94,7 @@ async function generateGeminiResponse(prompt: string, systemInstruction?: string
             contents = [{ text: prompt }];
         }
 
+        const { promise: tOut, cancel: cancelTimeout } = makeTimeout(15000);
         const result = await Promise.race([
             (aiClient.models.generateContent({
                 model: modelName,
@@ -94,8 +104,9 @@ async function generateGeminiResponse(prompt: string, systemInstruction?: string
                     temperature: temperature,
                 },
             }) as any),
-            timeoutPromise(15000)
+            tOut
         ]);
+        cancelTimeout();
 
         console.log('[GEMINI REQUEST FINISHED]');
         const responseText =
@@ -160,10 +171,12 @@ export async function generateAIResponse(
                 const openAiClient = getOpenAiClient();
                 if (!openAiClient) throw new Error('No OpenAI configured');
                 console.log('[OPENAI FALLBACK]');
+                const { promise: tOutOai, cancel: cancelOai } = makeTimeout(15000);
                 const { text, inputTokens, outputTokens } = await Promise.race([
                     generateOpenAIResponse(prompt, systemInstruction, temperature),
-                    timeoutPromise(15000),
+                    tOutOai,
                 ]);
+                cancelOai();
                 console.log('[OPENAI SUCCESS]', text);
                 return { response: text, provider: 'openai', usage: { inputTokens, outputTokens } };
             } catch (openaiError: any) {
@@ -211,7 +224,7 @@ Responda EXATAMENTE neste formato JSON:
                 ],
                 config: { temperature: 0.3 },
             }) as any),
-            timeoutPromise(20000),
+            makeTimeout(20000).promise,
         ]);
 
         const raw = result?.text || result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -234,24 +247,51 @@ Responda EXATAMENTE neste formato JSON:
 
 export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
     console.log('[STT PIPELINE START]');
+
+    // Prefer Whisper if a direct OpenAI key is configured
+    const openAiClient = getOpenAiDirectClient();
+    if (openAiClient) {
+        try {
+            const transcription = await openAiClient.audio.transcriptions.create({
+                file: new File([audioBuffer], 'audio.ogg', { type: 'audio/ogg' }),
+                model: 'whisper-1',
+            });
+            console.log('[STT SUCCESS] Whisper transcribed');
+            return transcription.text;
+        } catch (error: any) {
+            console.warn('[STT WHISPER FAILED] Falling back to Gemini STT', error?.message);
+        }
+    }
+
+    // Fallback: Gemini multimodal audio transcription
     try {
-        const openAiClient = getOpenAiClient();
-        if (!openAiClient) throw new Error('OpenAI API Key not configured for STT');
+        const aiClient = getAiClient();
+        const { promise: tOut, cancel } = makeTimeout(20000);
+        const result = await Promise.race([
+            aiClient.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: [
+                    {
+                        inlineData: {
+                            mimeType: 'audio/ogg; codecs=opus',
+                            data: audioBuffer.toString('base64'),
+                        },
+                    },
+                    { text: 'Transcreva este áudio em português. Retorne apenas o texto transcrito, sem nenhum comentário adicional.' },
+                ],
+            }) as any,
+            tOut,
+        ]);
+        cancel();
 
-        // OpenAI SDK expects a file-like object. We can simulate this.
-        const file = {
-            name: 'audio.ogg',
-            type: 'audio/ogg',
-            data: audioBuffer
-        };
+        const text: string =
+            result?.text ||
+            result?.candidates?.[0]?.content?.parts?.[0]?.text ||
+            '';
 
-        const transcription = await openAiClient.audio.transcriptions.create({
-            file: new File([file.data], file.name, {type: file.type}),
-            model: 'whisper-1',
-        });
-        
-        console.log('[STT SUCCESS] Audio transcribed');
-        return transcription.text;
+        if (!text) throw new Error('Gemini STT returned empty response');
+        console.log('[STT SUCCESS] Gemini transcribed:', text.slice(0, 80));
+        return text.trim();
     } catch (error: any) {
         console.error('[STT GENERATION FAILED]', error);
         throw error;
@@ -261,8 +301,9 @@ export async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
 export async function generateAIAudio(text: string, voice: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer' = 'nova'): Promise<string> {
     console.log('[TTS PIPELINE START]', { voice, textLength: text.length });
     try {
-        const openAiClient = getOpenAiClient();
-        if (!openAiClient) throw new Error('OpenAI API Key not configured for TTS');
+        // TTS requires the real OpenAI API — OpenRouter does not proxy audio endpoints
+        const openAiClient = getOpenAiDirectClient();
+        if (!openAiClient) throw new Error('OPENAI_API_KEY not set — TTS unavailable (OpenRouter does not support /audio/speech)');
 
         const mp3 = await openAiClient.audio.speech.create({
             model: "tts-1",
@@ -279,12 +320,17 @@ export async function generateAIAudio(text: string, voice: 'alloy' | 'echo' | 'f
     }
 }
 
-export async function generateElevenLabsAudio(text: string, voiceId: string): Promise<string> {
+export async function generateElevenLabsAudio(
+    text: string,
+    voiceId: string,
+    settings?: { speed?: number; stability?: number; similarity_boost?: number; style?: number }
+): Promise<string> {
     const apiKey = process.env.ELEVENLABS_API_KEY;
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY not configured');
     if (!voiceId) throw new Error('ElevenLabs voice ID not configured');
 
-    console.log('[TTS ELEVENLABS START]', { voiceId, textLength: text.length });
+    const s = settings || {};
+    console.log('[TTS ELEVENLABS START]', { voiceId, textLength: text.length, settings: s });
 
     const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
         method: 'POST',
@@ -296,7 +342,12 @@ export async function generateElevenLabsAudio(text: string, voiceId: string): Pr
         body: JSON.stringify({
             text,
             model_id: 'eleven_flash_v2_5',
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            voice_settings: {
+                stability: s.stability ?? 0.65,
+                similarity_boost: s.similarity_boost ?? 0.80,
+                style: s.style ?? 0.15,
+                speed: s.speed ?? 0.92,
+            },
         }),
     });
 

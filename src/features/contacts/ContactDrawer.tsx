@@ -281,13 +281,19 @@ export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }
   return (
     <>
       {/* Backdrop overlay */}
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-md z-40 transition-all opacity-100" onClick={onClose} />
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+        className="fixed inset-0 bg-black/60 backdrop-blur-md z-40 transition-all" onClick={onClose} />
       
-      {/* Drawer layout */}
-      <div className={`fixed inset-y-0 right-0 w-full sm:w-[500px] bg-zinc-950/95 shadow-2xl z-50 border-l border-zinc-800/80 flex flex-col transform transition-transform duration-300 overflow-hidden font-sans pb-safe backdrop-blur-3xl`}>
+      {/* Drawer layout / Bottom Sheet on Mobile */}
+      <motion.div initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+        transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+        className="fixed inset-x-0 bottom-0 top-[10%] sm:inset-y-0 sm:left-auto sm:right-0 sm:top-0 w-full sm:w-[500px] bg-[#0B1020] rounded-t-[32px] sm:rounded-none shadow-[0_-10px_40px_rgba(0,0,0,0.5)] sm:shadow-2xl z-50 border-t sm:border-t-0 sm:border-l border-white/5 flex flex-col overflow-hidden font-sans pb-safe backdrop-blur-3xl">
+        <div className="sm:hidden flex justify-center p-3 shrink-0">
+           <div className="w-12 h-1.5 bg-white/20 rounded-full" />
+        </div>
         
         {/* Top Header - Glassmorphic with dynamic Temperature Gradient */}
-        <div className="p-6 border-b border-zinc-800/50 flex flex-col bg-transparent relative overflow-hidden">
+        <div className="p-5 sm:p-6 border-b border-white/5 flex flex-col bg-transparent relative overflow-hidden shrink-0">
           <div className={`absolute inset-0 opacity-15 pointer-events-none transition-colors duration-1000 bg-gradient-to-br ${bannerGradient}`} />
           
           <div className="flex gap-4 items-center relative z-10 w-full">
@@ -1051,7 +1057,7 @@ export const ContactDrawer: React.FC<ContactDrawerProps> = ({ contact, onClose }
           </div>
         </div>
 
-      </div>
+      </motion.div>
     </>
   );
 };

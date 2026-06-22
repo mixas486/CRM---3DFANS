@@ -860,14 +860,14 @@ export const InboxPage = () => {
     };
 
   return (
-    <div className="h-[calc(100vh-5rem)] -m-4 sm:-m-8 flex overflow-hidden font-sans bg-black rounded-lg sm:rounded-2xl border border-zinc-800/80 shadow-2xl relative z-0">
+    <div className={`h-[calc(100vh-5rem)] -m-4 sm:-m-8 flex overflow-hidden font-sans bg-black rounded-lg sm:rounded-2xl border border-zinc-800/80 shadow-2xl relative z-0 inbox-mobile ${selectedChat ? 'inbox-thread-active' : 'inbox-thread-empty'}`}>
       
       {/* Glow Effect */}
       <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-indigo-600/10 rounded-full blur-[120px] -z-10 pointer-events-none" />
       <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-purple-600/10 rounded-full blur-[100px] -z-10 pointer-events-none" />
 
       {/* 1. Lista de conversas (esquerda) */}
-      <div className="w-full md:w-80 lg:w-96 border-r border-zinc-800/60 bg-zinc-950/40 backdrop-blur-2xl flex flex-col shrink-0">
+      <div className="w-full md:w-80 lg:w-96 border-r border-zinc-800/60 bg-zinc-950/40 backdrop-blur-2xl flex flex-col shrink-0 inbox-chat-list">
         <div className="px-5 py-6 border-b border-zinc-800/60 shrink-0">
           <div className="flex items-center justify-between mb-5">
              <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-white to-zinc-400 tracking-tight">Caixa de Entrada</h2>
@@ -992,7 +992,7 @@ export const InboxPage = () => {
       {/* 2. Thread (centro) */}
       <div 
         {...getRootProps()}
-        className={`flex-1 flex flex-col bg-transparent relative outline-none ${selectedChat ? 'visible' : 'hidden md:flex'}`}
+        className={`flex-1 flex flex-col bg-transparent relative outline-none inbox-thread-pane`}
       >
         <input {...getInputProps()} />
         {selectedChat ? (() => {

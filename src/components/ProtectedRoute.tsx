@@ -1,29 +1,23 @@
-import React, { useEffect } from 'react';
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { Loader2 } from 'lucide-react';
-import { auth } from '../lib/firebase';
 
-export const ProtectedRoute: React.FC = () => {
-  const { user, loading } = useAuth();
+export const ProtectedRoute = ({ children, requireAdmin = false }: { children?: React.ReactNode; requireAdmin?: boolean }) => {
+    const { user, loading, isAdmin } = useAuth();
+    const location = useLocation();
 
-  useEffect(() => {
-    if (user && user.email !== 'michelskapp@gmail.com') {
-      auth.signOut();
+    if (loading) {
+        return <div className="h-screen bg-[#050816] flex items-center justify-center text-white">Carregando...</div>;
     }
-  }, [user]);
 
-  if (loading) {
-    return (
-      <div className="h-screen w-screen flex items-center justify-center bg-zinc-950 text-zinc-100">
-        <Loader2 className="w-8 h-8 animate-spin text-zinc-500" />
-      </div>
-    );
-  }
+    if (!user) {
+        return <Navigate to="/login" state={{ from: location }} replace />;
+    }
 
-  if (!user || user.email !== 'michelskapp@gmail.com') {
-    return <Navigate to="/login" replace />;
-  }
+    if (requireAdmin && !isAdmin) {
+         return <Navigate to="/dashboard" replace />;
+    }
 
-  return <Outlet />;
+    // Layout route (no children prop) → render <Outlet /> for nested routes
+    // Wrapper route (has children) → render children
+    return children ? <>{children}</> : <Outlet />;
 };
